@@ -26,8 +26,20 @@ from tqdm import tqdm
 
 # 导入本地模块
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# 直接导入，避免触发__init__.py
+import importlib.util
+spec = importlib.util.spec_from_file_location(
+    "cfg_module", 
+    os.path.join(os.path.dirname(__file__), 
+                 "denoising_diffusion_pytorch/classifier_free_guidance.py")
+)
+cfg_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cfg_module)
+Unet = cfg_module.Unet
+GaussianDiffusion = cfg_module.GaussianDiffusion
+
 from vae.kl_vae import KL_VAE
-from denoising_diffusion_pytorch.classifier_free_guidance import Unet, GaussianDiffusion
 
 
 def load_model(checkpoint_path, device='cuda'):
