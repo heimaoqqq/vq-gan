@@ -328,6 +328,11 @@ class LatentDiffusionTrainer:
             self.results_folder.mkdir(exist_ok=True, parents=True)
         
         self.step = 0
+        
+        # 异常检测
+        self.loss_history = []
+        self.nan_count = 0
+        self.high_loss_count = 0
     
     def train(self):
         """训练循环"""
@@ -379,6 +384,10 @@ class LatentDiffusionTrainer:
                 pbar.set_description(f'loss: {total_loss:.4f}')
                 self.step += 1
                 
+                # 异常检测
+                if self.accelerator.is_main_process:
+                    self._check_training_health(total_loss)
+                
                 # EMA更新
                 if self.accelerator.is_main_process:
                     self.ema.update()
@@ -391,46 +400,120 @@ class LatentDiffusionTrainer:
         
         print('Training complete!')
     
+    def _check_training_health(self, loss):
+        """检测训练异常"""
+        import math
+        
+        # 记录loss历史（最近100步）
+        self.loss_history.append(loss)
+        if len(self.loss_history) > 100:
+            self.loss_history.pop(0)
+        
+        # 检查1: NaN或Inf
+        if math.isnan(loss) or math.isinf(loss):
+            self.nan_count += 1
+            print(f"\n⚠️ 警告: Loss is NaN/Inf (第{self.nan_count}次)")
+            
+            if self.nan_count >= 3:
+                print("\n❌ 严重错误: Loss持续NaN/Inf，训练失败！")
+                print("   可能原因：学习率过大、梯度爆炸、数据问题")
+                print("   建议：降低学习率或检查数据")
+                raise RuntimeError("Training diverged - Loss is NaN/Inf")
+        
+        # 检查2: Loss异常高
+        if loss > 1.0 and self.step > 1000:
+            self.high_loss_count += 1
+            if self.high_loss_count > 50:
+                print(f"\n⚠️ 警告: Loss持续异常高 (>{loss:.4f})，训练可能无效")
+                print("   检查：数据是否正确加载？VAE是否正确？")
+        else:
+            self.high_loss_count = 0  # 重置
+        
+        # 检查3: Loss不下降（每5000步检查）
+        if self.step % 5000 == 0 and self.step > 5000:
+            if len(self.loss_history) >= 50:
+                recent_avg = sum(self.loss_history[-50:]) / 50
+                early_avg = sum(self.loss_history[:50]) / 50
+                
+                if recent_avg >= early_avg * 0.95:  # 几乎没下降
+                    print(f"\n⚠️ 注意: Loss下降缓慢 ({early_avg:.4f} → {recent_avg:.4f})")
+                    print("   可能原因：学习率过小、已收敛、或训练问题")
+        
+        # 检查4: Loss过低（可能过拟合）
+        if self.step > 50000 and loss < 0.0001:
+            print(f"\n⚠️ 警告: Loss非常低 ({loss:.6f})，可能过拟合/记忆训练集")
+            print("   建议：检查生成样本是否与训练集完全相同")
+    
     def save_and_sample(self, milestone):
         """保存检查点并生成样本"""
         self.ema.ema_model.eval()
         
+        print(f"\n{'='*60}")
+        print(f"Checkpoint {milestone} (步数: {self.step})")
+        print(f"{'='*60}")
+        
         # 生成样本（每个用户1张，共num_samples张）
-        with torch.no_grad():
-            # 选择要生成的用户
-            num_samples = min(self.config.num_samples, self.config.num_users)
-            user_ids = torch.arange(num_samples, device=self.accelerator.device)
-            
-            # DDPM采样
-            sampled_latents = self.ema.ema_model.sample(
-                classes=user_ids,
-                cond_scale=6.0
-            )
-            
-            # VAE解码
-            sampled_images = self.vae.decode_latents(sampled_latents)
-            
-            # 保存图像网格
-            save_path = self.results_folder / f'sample-{milestone}.png'
-            utils.save_image(
-                sampled_images,
-                str(save_path),
-                nrow=int(math.sqrt(num_samples))
-            )
-            print(f"Saved samples to {save_path}")
+        try:
+            with torch.no_grad():
+                # 选择要生成的用户
+                num_samples = min(self.config.num_samples, self.config.num_users)
+                user_ids = torch.arange(num_samples, device=self.accelerator.device)
+                
+                # DDPM采样
+                sampled_latents = self.ema.ema_model.sample(
+                    classes=user_ids,
+                    cond_scale=6.0
+                )
+                
+                # VAE解码
+                sampled_images = self.vae.decode_latents(sampled_latents)
+                
+                # 保存图像网格
+                save_path = self.results_folder / f'sample-{milestone}.png'
+                utils.save_image(
+                    sampled_images,
+                    str(save_path),
+                    nrow=int(math.sqrt(num_samples))
+                )
+                print(f"✓ 样本已保存: {save_path}")
+                
+                # 简单质量检查
+                img_min = sampled_images.min().item()
+                img_max = sampled_images.max().item()
+                img_mean = sampled_images.mean().item()
+                
+                if img_min < -0.1 or img_max > 1.1:
+                    print(f"  ⚠️ 警告: 图像值异常 [{img_min:.3f}, {img_max:.3f}]")
+                
+                print(f"  图像统计: min={img_min:.3f}, max={img_max:.3f}, mean={img_mean:.3f}")
+                
+        except Exception as e:
+            print(f"  ✗ 生成样本失败: {e}")
         
         # 保存检查点
         if self.accelerator.is_local_main_process:
-            data = {
-                'step': self.step,
-                'model': self.accelerator.get_state_dict(self.diffusion),
-                'opt': self.opt.state_dict(),
-                'ema': self.ema.state_dict(),
-                'config': self.config.__dict__
-            }
-            save_path = self.results_folder / f'model-{milestone}.pt'
-            torch.save(data, str(save_path))
-            print(f"Saved checkpoint to {save_path}")
+            try:
+                data = {
+                    'step': self.step,
+                    'model': self.accelerator.get_state_dict(self.diffusion),
+                    'opt': self.opt.state_dict(),
+                    'ema': self.ema.state_dict(),
+                    'config': self.config.__dict__,
+                    'loss_history': self.loss_history[-100:]  # 保存最近100步loss
+                }
+                save_path = self.results_folder / f'model-{milestone}.pt'
+                torch.save(data, str(save_path))
+                print(f"✓ 检查点已保存: {save_path}")
+                
+                # 同时保存最新检查点（覆盖）
+                latest_path = self.results_folder / 'model-latest.pt'
+                torch.save(data, str(latest_path))
+                print(f"✓ 最新检查点: {latest_path}")
+                
+            except Exception as e:
+                print(f"  ✗ 保存检查点失败: {e}")
+        
+        print(f"{'='*60}\n")
     
     def load(self, milestone):
         """加载检查点"""
