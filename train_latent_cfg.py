@@ -79,10 +79,10 @@ class Config:
     beta_schedule = 'cosine'
     
     # === 训练配置（针对P100 16GB优化）===
-    train_batch_size = 8
-    gradient_accumulate_every = 2  # 有效batch=16
-    train_lr = 1e-4
-    train_num_steps = 150000  # ~1500 epochs
+    train_batch_size = 16  # 1GB显存很充裕，可以提高
+    gradient_accumulate_every = 1  # 取消梯度累积，提升速度
+    train_lr = 1e-4  # 保持不变（有效batch=16不变）
+    train_num_steps = 150000  # ~2小时（比之前快2倍）
     
     # === 优化配置（防止过拟合）===
     ema_decay = 0.9995  # 高EMA平滑
