@@ -1,6 +1,10 @@
 """
 预编码脚本 - 将所有图像编码为潜在表示并缓存
-在训练前运行一次，大幅提升训练速度和显存效率
+同时保存训练集/测试集划分信息，方便后续分类器实验
+
+输出：
+  1. latents_cache/ - 所有图像的潜在表示（训练+测试）
+  2. data_split.json - 数据集划分信息
 """
 
 import os
@@ -8,6 +12,7 @@ import sys
 from pathlib import Path
 import argparse
 from tqdm import tqdm
+import json
 
 import torch
 from torchvision import transforms
@@ -19,17 +24,19 @@ from vae.kl_vae import KL_VAE
 
 
 def preprocess_dataset(vae_path, data_path, output_folder, num_users=31, 
-                       images_per_user=50, seed=42, device='cuda'):
+                       images_per_user_train=50, seed=42, 
+                       encode_all=True, device='cuda'):
     """
-    预编码所有训练图像到潜在空间
+    预编码所有图像到潜在空间，并保存数据集划分信息
     
     Args:
         vae_path: VAE权重路径
         data_path: 数据集路径
         output_folder: 缓存输出文件夹
         num_users: 用户数量
-        images_per_user: 每用户训练图像数
+        images_per_user_train: 每用户训练图像数（剩余为测试集）
         seed: 随机种子
+        encode_all: 是否编码所有图像（包括测试集）
         device: 设备
     """
     
@@ -64,11 +71,21 @@ def preprocess_dataset(vae_path, data_path, output_folder, num_users=31,
         transforms.ToTensor()
     ])
     
-    # 收集所有训练图像路径
+    # 收集所有图像路径并划分训练/测试集
     data_path = Path(data_path)
-    all_samples = []
+    train_samples = []
+    test_samples = []
+    data_split_info = {
+        'seed': seed,
+        'num_users': num_users,
+        'images_per_user_train': images_per_user_train,
+        'users': {}
+    }
     
-    print(f"Collecting image paths for {num_users} users...")
+    print(f"Collecting and splitting image paths for {num_users} users...")
+    print(f"  Train: {images_per_user_train} images/user")
+    print(f"  Test: remaining images/user")
+    
     for user_id in range(1, num_users + 1):
         user_folder = data_path / f"ID_{user_id}"
         
@@ -85,15 +102,43 @@ def preprocess_dataset(vae_path, data_path, output_folder, num_users=31,
         
         # 随机打乱
         indices = rng.permutation(len(image_paths))
-        image_paths = [image_paths[i] for i in indices]
+        image_paths_shuffled = [image_paths[i] for i in indices]
         
-        # 仅使用前images_per_user张
-        train_paths = image_paths[:images_per_user]
+        # 划分训练/测试集
+        train_paths = image_paths_shuffled[:images_per_user_train]
+        test_paths = image_paths_shuffled[images_per_user_train:]
         
+        # 保存划分信息
+        data_split_info['users'][f'ID_{user_id}'] = {
+            'user_id': user_id,
+            'label': user_id - 1,
+            'total_images': len(image_paths),
+            'train_images': [str(p.relative_to(data_path)) for p in train_paths],
+            'test_images': [str(p.relative_to(data_path)) for p in test_paths]
+        }
+        
+        # 添加到样本列表
         for img_path in train_paths:
-            all_samples.append((img_path, user_id - 1))
+            train_samples.append((img_path, user_id - 1, 'train'))
+        
+        if encode_all:
+            for img_path in test_paths:
+                test_samples.append((img_path, user_id - 1, 'test'))
     
-    print(f"Found {len(all_samples)} training images\n")
+    # 合并训练和测试样本
+    all_samples = train_samples + (test_samples if encode_all else [])
+    
+    print(f"\nDataset split:")
+    print(f"  Train: {len(train_samples)} images")
+    print(f"  Test: {len(test_samples)} images")
+    print(f"  Total to encode: {len(all_samples)} images\n")
+    
+    # 保存数据集划分信息
+    split_file = Path(output_folder) / 'data_split.json'
+    split_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(split_file, 'w', encoding='utf-8') as f:
+        json.dump(data_split_info, f, indent=2, ensure_ascii=False)
+    print(f"Data split info saved to: {split_file}\n")
     
     # 批量编码
     print("Encoding images to latent space...")
@@ -108,7 +153,7 @@ def preprocess_dataset(vae_path, data_path, output_folder, num_users=31,
             batch_images = []
             batch_paths = []
             
-            for img_path, label in batch_samples:
+            for img_path, label, split_type in batch_samples:
                 # 检查是否已缓存
                 # 使用 userID_filename.pt 格式避免文件名冲突
                 cache_filename = f"user_{label:02d}_{img_path.stem}.pt"
@@ -146,9 +191,12 @@ def preprocess_dataset(vae_path, data_path, output_folder, num_users=31,
     print(f"新编码: {encoded_count} 张")
     print(f"已存在: {skipped_count} 张")
     print(f"总计: {encoded_count + skipped_count} 张")
-    print(f"缓存位置: {output_path}")
-    print(f"\n现在可以开始训练了！")
-    print(f"  python train_latent_cfg.py")
+    print(f"\n输出文件:")
+    print(f"  潜在表示缓存: {output_path}/")
+    print(f"  数据集划分: {output_path}/data_split.json")
+    print(f"\n现在可以:")
+    print(f"  1. 开始DDPM训练: python train_latent_cfg.py")
+    print(f"  2. 进行分类器实验（使用data_split.json获取训练/测试集）")
 
 
 def main():
@@ -168,8 +216,10 @@ def main():
     # 数据参数
     parser.add_argument('--num_users', type=int, default=31,
                         help='用户数量')
-    parser.add_argument('--images_per_user', type=int, default=50,
-                        help='每用户训练图像数')
+    parser.add_argument('--images_per_user_train', type=int, default=50,
+                        help='每用户训练图像数（剩余为测试集）')
+    parser.add_argument('--encode_all', action='store_true', default=True,
+                        help='是否编码所有图像（包括测试集）')
     parser.add_argument('--seed', type=int, default=42,
                         help='随机种子')
     
@@ -184,7 +234,8 @@ def main():
         data_path=args.data_path,
         output_folder=args.output_folder,
         num_users=args.num_users,
-        images_per_user=args.images_per_user,
+        images_per_user_train=args.images_per_user_train,
+        encode_all=args.encode_all,
         seed=args.seed,
         device=args.device
     )
