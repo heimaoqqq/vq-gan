@@ -24,8 +24,31 @@ def test_vae_output_range(vae_path, image_paths, device='cuda'):
     """
     # 加载VAE
     print(f"Loading VAE from {vae_path}...")
-    vae = KL_VAE(embed_dim=4, scale_factor=0.18215)
-    vae.load_state_dict(torch.load(vae_path, map_location=device))
+    
+    # 加载checkpoint
+    checkpoint = torch.load(vae_path, map_location=device)
+    
+    # 检查checkpoint格式
+    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        # 训练检查点格式
+        print("Detected training checkpoint format")
+        vae_state = checkpoint['model_state_dict']
+        
+        # 获取配置信息（如果有）
+        embed_dim = checkpoint.get('embed_dim', 4)
+        scale_factor = checkpoint.get('scale_factor', 0.18215)
+        print(f"  embed_dim: {embed_dim}")
+        print(f"  scale_factor: {scale_factor}")
+    else:
+        # 直接state_dict格式
+        print("Detected direct state_dict format")
+        vae_state = checkpoint
+        embed_dim = 4
+        scale_factor = 0.18215
+    
+    # 创建VAE并加载权重
+    vae = KL_VAE(embed_dim=embed_dim, scale_factor=scale_factor)
+    vae.load_state_dict(vae_state)
     vae = vae.to(device)
     vae.eval()
     print("VAE loaded successfully\n")

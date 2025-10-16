@@ -97,8 +97,28 @@ def load_model(checkpoint_path, device='cuda'):
 def load_vae(vae_path, device='cuda'):
     """加载VAE解码器"""
     print(f"Loading VAE from {vae_path}...")
-    vae = KL_VAE(embed_dim=4, scale_factor=0.18215)
-    vae_state = torch.load(vae_path, map_location=device)
+    
+    # 加载checkpoint
+    checkpoint = torch.load(vae_path, map_location=device)
+    
+    # 检查checkpoint格式
+    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        # 训练检查点格式
+        print("  Detected training checkpoint format")
+        vae_state = checkpoint['model_state_dict']
+        
+        # 获取配置信息
+        embed_dim = checkpoint.get('embed_dim', 4)
+        scale_factor = checkpoint.get('scale_factor', 0.18215)
+        print(f"  embed_dim: {embed_dim}, scale_factor: {scale_factor}")
+    else:
+        # 直接state_dict格式
+        vae_state = checkpoint
+        embed_dim = 4
+        scale_factor = 0.18215
+    
+    # 创建VAE并加载权重
+    vae = KL_VAE(embed_dim=embed_dim, scale_factor=scale_factor)
     vae.load_state_dict(vae_state)
     vae = vae.to(device)
     vae.eval()

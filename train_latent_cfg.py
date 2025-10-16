@@ -203,8 +203,29 @@ class LatentDiffusionTrainer:
         
         # 加载VAE
         print("Loading VAE...")
-        self.vae = KL_VAE(embed_dim=4, scale_factor=0.18215)
-        vae_state = torch.load(config.vae_path, map_location='cpu')
+        
+        # 加载checkpoint
+        checkpoint = torch.load(config.vae_path, map_location='cpu')
+        
+        # 检查checkpoint格式
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            # 训练检查点格式
+            print("  Detected training checkpoint format")
+            vae_state = checkpoint['model_state_dict']
+            
+            # 获取配置信息
+            embed_dim = checkpoint.get('embed_dim', 4)
+            scale_factor = checkpoint.get('scale_factor', 0.18215)
+            print(f"  embed_dim: {embed_dim}, scale_factor: {scale_factor}")
+        else:
+            # 直接state_dict格式
+            print("  Detected direct state_dict format")
+            vae_state = checkpoint
+            embed_dim = 4
+            scale_factor = 0.18215
+        
+        # 创建VAE并加载权重
+        self.vae = KL_VAE(embed_dim=embed_dim, scale_factor=scale_factor)
         self.vae.load_state_dict(vae_state)
         self.vae.eval()
         self.vae.requires_grad_(False)
