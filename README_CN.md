@@ -234,8 +234,8 @@ print(f"用户1测试集: {len(split['users']['ID_1']['test_images'])} 张")
 
 # 输出:
 # Dataset split:
-#   Train: 1550 images
-#   Test: 3100 images
+#   Train: 1550 images (固定)
+#   Test: ~3100 images (数量不固定)
 #   Total to encode: 1550 images (只编码训练集)
 ```
 
