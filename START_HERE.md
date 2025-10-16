@@ -72,18 +72,22 @@ print(f"CUDA: {torch.cuda.is_available()}")
     --device cuda
 ```
 
-**预期输出**：
+**实际输出**（已验证）：
 ```
 VAE潜在表示统计信息：
-形状: [100, 4, 64, 64]
-最小值: -X.XXXX
-最大值: X.XXXX
-均值: X.XXXX
-标准差: X.XXXX
+形状: [100, 4, 32, 32]  ← 注意：32×32，8倍下采样
+最小值: -0.911665
+最大值: 0.918169
+均值: -0.000989
+标准差: 0.179068
 
 判断与建议：
-✓/✗ 潜在表示在[0, 1]范围内
-→ 建议设置 auto_normalize = True/False
+✗ 潜在表示NOT在[0, 1]范围内
+  → 实际范围: [-0.9117, 0.9182]
+  → 必须使用 auto_normalize=False ✓
+  → DDPM将在原始范围训练
+
+✓ 重建质量良好（MSE: 0.002646）
 ```
 
 **关键决策**：
@@ -230,8 +234,9 @@ for checkpoint in [50, 75, 100]:
 | **数据** | | |
 | num_users | 31 | 用户数 |
 | images_per_user_train | 50 | DDPM训练用 |
+| latent_size | 32 | 8倍下采样 |
 | **模型** | | |
-| dim | 48 | ~7M参数 |
+| dim | 48 | ~4M参数 |
 | dim_mults | (1,2,4) | 3层 |
 | **训练** | | |
 | train_batch_size | 8 | P100优化 |

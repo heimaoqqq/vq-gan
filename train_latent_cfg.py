@@ -50,7 +50,7 @@ class Config:
     images_per_user_train = 50   # 每用户用于DDPM训练的图像数
     # 剩余100张作为测试集，仅用于分类器评估，对DDPM不可见
     image_size = 256
-    latent_size = 64
+    latent_size = 32  # ⚠️ VAE是8倍下采样（256/8=32），不是4倍！
     latent_channels = 4
     
     # === 模型配置（针对小数据集优化）===
