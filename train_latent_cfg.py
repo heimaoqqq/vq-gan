@@ -74,9 +74,13 @@ class Config:
     
     # === 扩散配置 ===
     timesteps = 1000
-    sampling_timesteps = 250  # DDIM加速
+    sampling_timesteps = 100  # DDIM采样步数（100步足够，质量好且快）
     objective = 'pred_v'  # v-prediction
     beta_schedule = 'cosine'
+    
+    # === 采样配置 ===
+    cond_scale = 6.0  # CFG强度（推荐范围3-8，越高越符合条件但多样性降低）
+    rescaled_phi = 0.7  # CFG++ rescaling（默认0.7）
     
     # === 训练配置（针对P100 16GB优化）===
     train_batch_size = 16  # 1GB显存很充裕，可以提高
@@ -459,11 +463,13 @@ class LatentDiffusionTrainer:
                 num_samples = min(self.config.num_samples, self.config.num_users)
                 user_ids = torch.arange(num_samples, device=self.accelerator.device)
                 
-                # DDPM采样
+                # DDPM采样（条件扩散 + DDIM + CFG）
                 sampled_latents = self.ema.ema_model.sample(
-                    classes=user_ids,
-                    cond_scale=6.0
+                    classes=user_ids,              # 条件：用户ID
+                    cond_scale=self.config.cond_scale,  # CFG强度
+                    rescaled_phi=self.config.rescaled_phi  # CFG++ rescaling
                 )
+                # 采样方式：DDIM 100步（比1000步快10倍，质量相近）
                 
                 # VAE解码
                 sampled_images = self.vae.decode_latents(sampled_latents)
