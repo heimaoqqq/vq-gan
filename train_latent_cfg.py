@@ -161,7 +161,9 @@ class LatentDataset(Dataset):
         img_path, label = self.samples[idx]
         
         # 尝试从缓存加载
-        cache_path = self.latents_cache_folder / f"{img_path.stem}.pt"
+        # 使用 userID_filename.pt 格式避免文件名冲突
+        cache_filename = f"user_{label:02d}_{img_path.stem}.pt"
+        cache_path = self.latents_cache_folder / cache_filename
         
         if cache_path.exists():
             latent = torch.load(cache_path, map_location='cpu')
@@ -172,8 +174,8 @@ class LatentDataset(Dataset):
             
             with torch.no_grad():
                 img_batch = img.unsqueeze(0).to(next(self.vae.parameters()).device)
-                latent = self.vae.encode_images(img_batch)  # [1, 4, 64, 64]
-                latent = latent.squeeze(0).cpu()  # [4, 64, 64]
+                latent = self.vae.encode_images(img_batch)  # [1, 4, 32, 32]
+                latent = latent.squeeze(0).cpu()  # [4, 32, 32]
             
             # 保存缓存
             cache_path.parent.mkdir(parents=True, exist_ok=True)

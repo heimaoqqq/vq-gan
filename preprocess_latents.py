@@ -110,7 +110,9 @@ def preprocess_dataset(vae_path, data_path, output_folder, num_users=31,
             
             for img_path, label in batch_samples:
                 # 检查是否已缓存
-                cache_path = output_path / f"{img_path.stem}.pt"
+                # 使用 userID_filename.pt 格式避免文件名冲突
+                cache_filename = f"user_{label:02d}_{img_path.stem}.pt"
+                cache_path = output_path / cache_filename
                 
                 if cache_path.exists():
                     skipped_count += 1
