@@ -130,9 +130,9 @@ class PreNorm(nn.Module):
         self.fn = fn
         self.norm = RMSNorm(dim)
 
-    def forward(self, x):
+    def forward(self, x, *args, **kwargs):
         x = self.norm(x)
-        return self.fn(x)
+        return self.fn(x, *args, **kwargs)
 
 # sinusoidal positional embeds
 
@@ -268,6 +268,61 @@ class Attention(nn.Module):
         out = rearrange(out, 'b h (x y) d -> b (h d) x y', x = h, y = w)
         return self.to_out(out)
 
+
+class CrossAttention(nn.Module):
+    """
+    交叉注意力模块 - 让图像特征查询条件向量
+    用于细粒度条件生成任务（如微多普勒步态的用户ID条件）
+    
+    工作原理:
+    - Query (Q): 来自图像特征 - "我需要什么信息？"
+    - Key (K) & Value (V): 来自条件向量 - "用户X的特征是什么？"
+    - 输出: 图像特征被条件信息调制后的结果
+    """
+    def __init__(self, dim, context_dim, heads = 4, dim_head = 32):
+        super().__init__()
+        self.scale = dim_head ** -0.5
+        self.heads = heads
+        hidden_dim = dim_head * heads
+
+        # Query来自图像特征
+        self.to_q = nn.Conv2d(dim, hidden_dim, 1, bias = False)
+        # Key和Value来自条件向量
+        self.to_k = nn.Linear(context_dim, hidden_dim, bias = False)
+        self.to_v = nn.Linear(context_dim, hidden_dim, bias = False)
+        
+        self.to_out = nn.Conv2d(hidden_dim, dim, 1)
+
+    def forward(self, x, context):
+        """
+        Args:
+            x: 图像特征 [batch, channels, height, width]
+            context: 条件向量 [batch, context_dim]
+        Returns:
+            调制后的图像特征 [batch, channels, height, width]
+        """
+        b, c, h, w = x.shape
+        
+        # Query from image features
+        q = self.to_q(x)  # [b, hidden_dim, h, w]
+        q = rearrange(q, 'b (h c) x y -> b h c (x y)', h = self.heads)  # [b, heads, dim_head, h*w]
+        
+        # Key and Value from context (condition vector)
+        k = self.to_k(context)  # [b, hidden_dim]
+        v = self.to_v(context)  # [b, hidden_dim]
+        k = rearrange(k, 'b (h c) -> b h c 1', h = self.heads)  # [b, heads, dim_head, 1]
+        v = rearrange(v, 'b (h c) -> b h c 1', h = self.heads)  # [b, heads, dim_head, 1]
+        
+        q = q * self.scale
+        
+        # Cross-attention: image queries attend to condition keys
+        sim = einsum('b h d i, b h d j -> b h i j', q, k)  # [b, heads, h*w, 1]
+        attn = sim.softmax(dim = -1)
+        out = einsum('b h i j, b h d j -> b h i d', attn, v)  # [b, heads, h*w, dim_head]
+        
+        out = rearrange(out, 'b h (x y) d -> b (h d) x y', x = h, y = w)
+        return self.to_out(out)
+
 # model
 
 class Unet(nn.Module):
@@ -350,12 +405,14 @@ class Unet(nn.Module):
                 ResnetBlock(dim_in, dim_in, time_emb_dim = time_dim, classes_emb_dim = classes_dim),
                 ResnetBlock(dim_in, dim_in, time_emb_dim = time_dim, classes_emb_dim = classes_dim),
                 Residual(PreNorm(dim_in, LinearAttention(dim_in))),
+                Residual(PreNorm(dim_in, CrossAttention(dim_in, context_dim = classes_dim, dim_head = attn_dim_head, heads = attn_heads))),  # 新增：交叉注意力
                 Downsample(dim_in, dim_out) if not is_last else nn.Conv2d(dim_in, dim_out, 3, padding = 1)
             ]))
 
         mid_dim = dims[-1]
         self.mid_block1 = ResnetBlock(mid_dim, mid_dim, time_emb_dim = time_dim, classes_emb_dim = classes_dim)
         self.mid_attn = Residual(PreNorm(mid_dim, Attention(mid_dim, dim_head = attn_dim_head, heads = attn_heads)))
+        self.mid_cross_attn = Residual(PreNorm(mid_dim, CrossAttention(mid_dim, context_dim = classes_dim, dim_head = attn_dim_head, heads = attn_heads)))  # 新增：中间层交叉注意力
         self.mid_block2 = ResnetBlock(mid_dim, mid_dim, time_emb_dim = time_dim, classes_emb_dim = classes_dim)
 
         for ind, (dim_in, dim_out) in enumerate(reversed(in_out)):
@@ -365,6 +422,7 @@ class Unet(nn.Module):
                 ResnetBlock(dim_out + dim_in, dim_out, time_emb_dim = time_dim, classes_emb_dim = classes_dim),
                 ResnetBlock(dim_out + dim_in, dim_out, time_emb_dim = time_dim, classes_emb_dim = classes_dim),
                 Residual(PreNorm(dim_out, LinearAttention(dim_out))),
+                Residual(PreNorm(dim_out, CrossAttention(dim_out, context_dim = classes_dim, dim_head = attn_dim_head, heads = attn_heads))),  # 新增：交叉注意力
                 Upsample(dim_out, dim_in) if not is_last else  nn.Conv2d(dim_out, dim_in, 3, padding = 1)
             ]))
 
@@ -411,8 +469,23 @@ class Unet(nn.Module):
         x,
         time,
         classes,
-        cond_drop_prob = None
+        cond_drop_prob = None,
+        return_features = False
     ):
+        """
+        U-Net前向传播
+        
+        Args:
+            x: 输入图像 [B, C, H, W]
+            time: 时间步 [B]
+            classes: 类别标签 [B]
+            cond_drop_prob: 条件丢弃概率（用于CFG）
+            return_features: 是否返回bottleneck特征（用于对比学习）
+        
+        Returns:
+            如果return_features=False: 预测的噪声 [B, C, H, W]
+            如果return_features=True: (预测的噪声, bottleneck特征)
+        """
         batch, device = x.shape[0], x.device
 
         cond_drop_prob = default(cond_drop_prob, self.cond_drop_prob)
@@ -442,34 +515,50 @@ class Unet(nn.Module):
 
         h = []
 
-        for block1, block2, attn, downsample in self.downs:
+        for block1, block2, attn, cross_attn, downsample in self.downs:
             x = block1(x, t, c)
             h.append(x)
 
             x = block2(x, t, c)
             x = attn(x)
+            x = cross_attn(x, c)  # 交叉注意力：图像特征查询条件向量
             h.append(x)
 
             x = downsample(x)
 
         x = self.mid_block1(x, t, c)
         x = self.mid_attn(x)
+        
+        # 对比学习：在bottleneck层提取特征
+        if return_features:
+            # 全局平均池化: [B, C, H, W] -> [B, C]
+            bottleneck_features = F.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1)
+            # L2归一化（SupCon要求）
+            bottleneck_features = F.normalize(bottleneck_features, dim=1)
+        
+        x = self.mid_cross_attn(x, c)  # 中间层交叉注意力
         x = self.mid_block2(x, t, c)
 
-        for block1, block2, attn, upsample in self.ups:
+        for block1, block2, attn, cross_attn, upsample in self.ups:
             x = torch.cat((x, h.pop()), dim = 1)
             x = block1(x, t, c)
 
             x = torch.cat((x, h.pop()), dim = 1)
             x = block2(x, t, c)
             x = attn(x)
+            x = cross_attn(x, c)  # 交叉注意力：图像特征查询条件向量
 
             x = upsample(x)
 
         x = torch.cat((x, r), dim = 1)
 
         x = self.final_res_block(x, t, c)
-        return self.final_conv(x)
+        output = self.final_conv(x)
+        
+        if return_features:
+            return output, bottleneck_features
+        else:
+            return output
 
 # gaussian diffusion trainer class
 
@@ -780,7 +869,7 @@ class GaussianDiffusion(nn.Module):
             extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise
         )
 
-    def p_losses(self, x_start, t, *, classes, noise = None):
+    def p_losses(self, x_start, t, *, classes, noise = None, return_features = False):
         b, c, h, w = x_start.shape
         noise = default(noise, lambda: torch.randn_like(x_start))
 
@@ -790,7 +879,10 @@ class GaussianDiffusion(nn.Module):
 
         # predict and take gradient step
 
-        model_out = self.model(x, t, classes)
+        if return_features:
+            model_out, features = self.model(x, t, classes, return_features=True)
+        else:
+            model_out = self.model(x, t, classes)
 
         if self.objective == 'pred_noise':
             target = noise
@@ -806,7 +898,11 @@ class GaussianDiffusion(nn.Module):
         loss = reduce(loss, 'b ... -> b', 'mean')
 
         loss = loss * extract(self.loss_weight, t, loss.shape)
-        return loss.mean()
+        
+        if return_features:
+            return loss.mean(), features
+        else:
+            return loss.mean()
 
     def forward(self, img, *args, **kwargs):
         b, c, h, w, device, img_size, = *img.shape, img.device, self.image_size

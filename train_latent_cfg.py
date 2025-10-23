@@ -4,7 +4,19 @@ Latent Diffusion Training with Classifier-Free Guidance
 微多普勒时频图像生成 - 基于预训练VAE的潜在扩散模型
 
 数据流：
-  JPG图像(256×256×3) → VAE编码 → 潜在表示(64×64×4) → DDPM训练
+  JPG图像(256×256×3) → VAE编码 → 潜在表示(32×32×4) → DDPM训练
+
+数据特点与挑战：
+  ✓ 数据规模：31用户 × 50训练样本 = 1550张（小数据集）
+  ✓ 用户内变异：极大（步态周期、角度、状态差异显著）
+  ✓ 用户间差异：极小（肉眼难以区分，需要强判别能力）
+  ✗ 传统数据增强效果差
+  
+关键设计决策：
+  1. 更大的模型容量（dim=96, 4层）→ 捕捉微妙差异
+  2. 更强的条件编码（96维 × 31类）→ 有效表达用户特征
+  3. 平衡的CFG设置（drop=0.2, scale=3.5）→ 避免模式崩塌
+  4. 稳定的训练策略（低lr, 梯度累积）→ 防止过拟合
 
 Kaggle路径：
   VAE: /kaggle/input/kl-vae-best-pt/kl_vae_best.pt
@@ -51,7 +63,7 @@ class Config:
     """集中管理所有配置参数"""
     
     # === 路径配置 ===
-    vae_path = '/kaggle/input/kl-vae-best-pt/kl_vae_best.pt'
+    vae_path = '/kaggle/input/kl-vae/kl_vae_best.pt'
     data_path = '/kaggle/input/organized-gait-dataset/Normal_line'
     results_folder = './results'
     latents_cache_folder = './latents_cache'  # 预处理缓存
@@ -62,41 +74,64 @@ class Config:
     images_per_user_train = 50   # 每用户用于DDPM训练的图像数
     # 剩余100张作为测试集，仅用于分类器评估，对DDPM不可见
     image_size = 256
-    latent_size = 32  # ⚠️ VAE是8倍下采样（256/8=32），不是4倍！
+    latent_size = 32  # VAE是8倍下采样（256/8=32）
     latent_channels = 4
     
-    # === 模型配置（针对小数据集优化）===
-    dim = 48  # 基础维度，适配1550张数据
-    dim_mults = (1, 2, 4)  # 3层结构
-    attn_dim_head = 32
-    attn_heads = 4
-    cond_drop_prob = 0.5  # CFG条件丢弃概率
+    # === 模型配置（针对微多普勒数据优化）===
+    # 关键考虑：用户间差异极小，需要强大的条件编码和判别能力
+    # 实际参数量约44M
+    dim = 96  # 基础维度：平衡模型容量与过拟合风险
+    dim_mults = (1, 2, 4, 4)  # 4层结构：避免最后一层过大
+    attn_dim_head = 64  # 注意力头维度：增加到64以匹配classes_dim=384（64×8=512>384）
+    attn_heads = 8  # 增加注意力头数：更好捕捉用户间微妙差异
+    cond_drop_prob = 0.2  # CFG条件丢弃：0.2适配用户间差异小的数据集
     
     # === 扩散配置 ===
     timesteps = 1000
-    sampling_timesteps = 100  # DDIM采样步数（100步足够，质量好且快）
+    sampling_timesteps = 150  # DDIM采样步数（100步足够，质量好且快）
     objective = 'pred_v'  # v-prediction
     beta_schedule = 'cosine'
-    
     # === 采样配置 ===
-    cond_scale = 6.0  # CFG强度（推荐范围3-8，越高越符合条件但多样性降低）
-    rescaled_phi = 0.7  # CFG++ rescaling（默认0.7）
+    # 用户间差异小 → 需要适中的CFG强度来强化微弱的条件信号
+    cond_scale = 7.5  # CFG强度：7.5强化细粒度条件信号
+    rescaled_phi = 0.7  # CFG++ rescaling：标准值，适配cond_scale=7.5
     
-    # === 训练配置（针对P100 16GB优化）===
-    train_batch_size = 16  # 1GB显存很充裕，可以提高
-    gradient_accumulate_every = 1  # 取消梯度累积，提升速度
-    train_lr = 1e-4  # 保持不变（有效batch=16不变）
-    train_num_steps = 150000  # ~2小时（比之前快2倍）
+    # === 训练配置（针对RTX 5880 48GB + 小数据集优化）===
+    train_batch_size = 12  # batch size：模型44M参数，48GB显存绰绰有余
+    gradient_accumulate_every = 3  # 梯度累积：有效batch=36，保持训练稳定性
+    train_lr = 4e-5  # 学习率：配合cond_drop_prob=0.2，略微提高以加快收敛
+    train_num_steps = 66000  # 训练步数：约1500 epochs，避免过拟合，33个checkpoint
     
-    # === 优化配置（防止过拟合）===
-    ema_decay = 0.9995  # 高EMA平滑
-    ema_update_every = 10
-    max_grad_norm = 1.0  # 梯度裁剪
-    adam_betas = (0.9, 0.99)
+    # === 优化配置（防止过拟合 + 增加多样性）===
+    ema_decay = 0.999  # EMA平滑：降低平滑系数，增加多样性
+    ema_update_every = 10  # EMA更新频率
+    max_grad_norm = 1.0  # 梯度裁剪：防止梯度爆炸
+    adam_betas = (0.9, 0.99)  # Adam优化器参数
+    weight_decay = 1e-4  # 权重衰减：L2正则化，防止过拟合
     
     # === Min-SNR优化（小数据集关键）===
+    # Min-SNR帮助模型更好地学习所有时间步，避免过度关注简单样本
     min_snr_loss_weight = True
-    min_snr_gamma = 5
+    min_snr_gamma = 5  # gamma=5适合小数据集
+    
+    # === 对比学习配置 ===
+    # 针对微多普勒数据集优化：用户间差异小，需要强对比学习
+    use_contrastive_loss = True  # 是否使用对比学习损失
+    contrastive_weight = 0.08  # 对比学习损失权重（配合cond_drop_prob=0.2）
+    # 权重说明：
+    #   - 0.03: 极度保守（推荐，配合K-Medoids，目标对比占比20-25%）
+    #   - 0.05: 非常保守（可能导致对比占比30-40%）
+    #   - 0.08: 保守（可能导致对比占比40-50%）
+    #   - 0.1: 标准（可能导致对比占比>50%）
+    contrastive_temperature = 0.07  # SupCon温度参数
+    # 温度说明：
+    #   - 0.05: 更强对比，更尖锐的分布（适合差异极小的数据）
+    #   - 0.07: 标准值（推荐）
+    #   - 0.1: 更弱对比，更平滑的分布
+    contrastive_start_step = 2000  # 从第几步开始使用对比学习（约45 epochs后启动）
+    # 开始步数说明：
+    #   - 0: 从头开始（充分利用对比学习）
+    #   - 5000: 延迟启动（推荐，让扩散模型先稳定，配合K-Medoids）
     
     # === 归一化配置 ===
     # ⚠️ 重要：运行 test_vae_range.py 确定此参数！
@@ -105,13 +140,67 @@ class Config:
     auto_normalize = False  # 默认False，运行test_vae_range.py后根据结果调整
     
     # === 监控配置 ===
-    save_and_sample_every = 2000
+    save_and_sample_every = 2000  # 每2000步保存一次（约45 epochs）
     num_samples = 16  # 生成16张检查
     
     # === 其他 ===
-    amp = True  # 混合精度
-    num_workers = 4
+    amp = False  # 混合精度（P100不支持Tensor Cores，FP16反而不稳定）
+    num_workers = 0  # Windows上设为0避免多进程问题，数据已缓存所以影响不大
     seed = 42
+    
+    def print_config_summary(self):
+        """打印配置摘要"""
+        print("\n" + "="*60)
+        print("训练配置摘要")
+        print("="*60)
+        
+        print(f"\n数据: {self.num_users}用户 × {self.images_per_user_train}张 = {self.num_users * self.images_per_user_train}张")
+        
+        print(f"\n模型: dim={self.dim}, 层数={len(self.dim_mults)}, 注意力={self.attn_heads}头")
+        print(f"      估算参数量 ~{self._estimate_params():.1f}M（实际以训练时显示为准）")
+        
+        print(f"\nCFG: drop={self.cond_drop_prob}, scale={self.cond_scale}")
+        
+        print(f"\n训练: batch={self.train_batch_size}×{self.gradient_accumulate_every}, lr={self.train_lr}, steps={self.train_num_steps:,}")
+        
+        # 对比学习配置
+        if self.use_contrastive_loss:
+            print(f"\n对比学习: 启用")
+            print(f"      权重={self.contrastive_weight}, 温度={self.contrastive_temperature}")
+            print(f"      开始步数={self.contrastive_start_step}")
+        else:
+            print(f"\n对比学习: 未启用")
+        
+        print("="*60 + "\n")
+    
+    def _estimate_params(self):
+        """估计模型参数量（百万）"""
+        # 更准确的UNet参数估计
+        total = 0
+        
+        # 初始卷积
+        total += self.dim * self.latent_channels * 7 * 7
+        
+        # Encoder/Decoder层（每层2个ResBlock + 注意力）
+        dims = [self.dim * m for m in self.dim_mults]
+        for i in range(len(dims)):
+            d = dims[i]
+            # ResBlock参数（2个卷积 + 时间/类别嵌入）
+            total += d * d * 3 * 3 * 4  # 4个ResBlock
+            # 注意力参数
+            total += d * d * 4  # QKV + output projection
+        
+        # 时间嵌入MLP
+        time_dim = self.dim * 4
+        total += self.dim * time_dim + time_dim * time_dim
+        
+        # 类别嵌入MLP
+        total += self.dim * time_dim + time_dim * time_dim
+        
+        # 中间层
+        total += dims[-1] * dims[-1] * 3 * 3 * 2
+        
+        return total / 1e6
 
 
 # ============================================================
@@ -137,29 +226,64 @@ class LatentDataset(Dataset):
         # 收集所有图像路径和标签
         self.samples = []
         
-        for user_id in range(1, num_users + 1):
-            user_folder = self.data_path / f"ID_{user_id}"
-            if not user_folder.exists():
-                print(f"Warning: {user_folder} not found, skipping...")
-                continue
+        # 尝试从data_split.json加载预处理的划分
+        split_file = self.latents_cache_folder / 'data_split.json'
+        use_precomputed_split = False
+        
+        if split_file.exists():
+            import json
+            try:
+                with open(split_file, 'r', encoding='utf-8') as f:
+                    split_info = json.load(f)
+                
+                sampling_method = split_info.get('sampling_method', 'unknown')
+                print(f"✓ 找到预处理的数据划分: {split_file}")
+                print(f"  采样方法: {sampling_method}")
+                
+                # 使用预处理的训练集划分
+                for user_key, user_info in split_info['users'].items():
+                    user_id = user_info['user_id']
+                    label = user_info['label']
+                    
+                    # 获取训练集文件路径
+                    for rel_path in user_info['train_images']:
+                        img_path = self.data_path / rel_path
+                        if img_path.exists():
+                            self.samples.append((img_path, label))
+                
+                use_precomputed_split = True
+                print(f"✓ 使用预处理的训练集划分 ({sampling_method})")
+                
+            except Exception as e:
+                print(f"Warning: 无法加载data_split.json: {e}")
+                print("  将使用随机抽样")
+        
+        # 如果没有预处理的划分，使用随机抽样（旧方法）
+        if not use_precomputed_split:
+            print("未找到预处理的数据划分，使用随机抽样")
             
-            # 收集该用户的所有jpg图像（排序确保一致性）
-            image_paths = sorted(list(user_folder.glob("*.jpg")))
-            
-            # 为每个用户设置独立但可复现的随机种子
-            # 这样确保即使添加新用户，现有用户的划分也不变
-            user_seed = seed + user_id
-            rng = np.random.RandomState(user_seed)
-            
-            # 随机打乱（固定种子）
-            indices = rng.permutation(len(image_paths))
-            image_paths = [image_paths[i] for i in indices]
-            
-            # 仅使用前images_per_user张（默认50张）
-            train_paths = image_paths[:images_per_user]
-            
-            for img_path in train_paths:
-                self.samples.append((img_path, user_id - 1))  # label: 0-30
+            for user_id in range(1, num_users + 1):
+                user_folder = self.data_path / f"ID_{user_id}"
+                if not user_folder.exists():
+                    print(f"Warning: {user_folder} not found, skipping...")
+                    continue
+                
+                # 收集该用户的所有jpg图像（排序确保一致性）
+                image_paths = sorted(list(user_folder.glob("*.jpg")))
+                
+                # 为每个用户设置独立但可复现的随机种子
+                user_seed = seed + user_id
+                rng = np.random.RandomState(user_seed)
+                
+                # 随机打乱（固定种子）
+                indices = rng.permutation(len(image_paths))
+                image_paths = [image_paths[i] for i in indices]
+                
+                # 仅使用前images_per_user张
+                train_paths = image_paths[:images_per_user]
+                
+                for img_path in train_paths:
+                    self.samples.append((img_path, user_id - 1))  # label: 0-30
         
         print(f"DDPM训练集: {len(self.samples)} 张图像 ({num_users}用户 × {images_per_user}张/用户)")
         
@@ -182,7 +306,7 @@ class LatentDataset(Dataset):
         cache_path = self.latents_cache_folder / cache_filename
         
         if cache_path.exists():
-            latent = torch.load(cache_path, map_location='cpu')
+            latent = torch.load(cache_path, map_location='cpu', weights_only=True)
         else:
             # 从原始图像编码
             img = Image.open(img_path).convert('RGB')
@@ -209,6 +333,9 @@ class LatentDiffusionTrainer:
     def __init__(self, config):
         self.config = config
         
+        # 打印配置摘要
+        config.print_config_summary()
+        
         # 初始化Accelerator
         self.accelerator = Accelerator(
             split_batches=True,
@@ -221,6 +348,9 @@ class LatentDiffusionTrainer:
         
         # 加载VAE
         print("Loading VAE...")
+        print(f"  VAE模块路径: {KL_VAE.__module__}")
+        import vae.kl_vae
+        print(f"  VAE文件路径: {vae.kl_vae.__file__}")
         
         # 加载checkpoint
         checkpoint = torch.load(config.vae_path, map_location='cpu')
@@ -305,12 +435,30 @@ class LatentDiffusionTrainer:
         else:
             print("  → 潜在空间会被归一化到[-1,1]")
         
-        # 创建优化器
+        # 创建优化器（添加weight decay防止过拟合）
         self.opt = torch.optim.Adam(
             self.diffusion.parameters(),
             lr=config.train_lr,
-            betas=config.adam_betas
+            betas=config.adam_betas,
+            weight_decay=config.weight_decay
         )
+        
+        # 对比学习损失（如果启用）
+        if config.use_contrastive_loss:
+            print(f"\n✓ 启用对比学习损失")
+            print(f"  权重: {config.contrastive_weight}")
+            print(f"  温度: {config.contrastive_temperature}")
+            print(f"  开始步数: {config.contrastive_start_step}")
+            
+            from losses import SupConLoss
+            self.contrastive_criterion = SupConLoss(
+                temperature=config.contrastive_temperature,
+                contrast_mode='all',
+                base_temperature=config.contrastive_temperature
+            )
+        else:
+            print("\n✗ 未启用对比学习损失")
+            self.contrastive_criterion = None
         
         # 使用Accelerator准备
         self.diffusion, self.opt, self.train_dl = self.accelerator.prepare(
@@ -337,6 +485,9 @@ class LatentDiffusionTrainer:
         self.loss_history = []
         self.nan_count = 0
         self.high_loss_count = 0
+        
+        # 对比学习损失历史（用于监控）
+        self.contrastive_loss_history = []
     
     def train(self):
         """训练循环"""
@@ -358,17 +509,71 @@ class LatentDiffusionTrainer:
             while self.step < config.train_num_steps:
                 self.diffusion.train()
                 total_loss = 0.
+                total_diffusion_loss = 0.
+                total_contrastive_loss = 0.
                 
                 # 梯度累积
-                for _ in range(config.gradient_accumulate_every):
+                for grad_accum_idx in range(config.gradient_accumulate_every):
                     latents, labels = next(dl)
                     latents = latents.to(self.accelerator.device)
                     labels = labels.to(self.accelerator.device)
                     
+                    # 调试：第一步打印数据范围
+                    if self.step == 0 and grad_accum_idx == 0 and self.accelerator.is_main_process:
+                        print(f"\n[调试] 数据范围检查:")
+                        print(f"  latents shape: {latents.shape}")
+                        print(f"  latents min: {latents.min().item():.4f}")
+                        print(f"  latents max: {latents.max().item():.4f}")
+                        print(f"  latents mean: {latents.mean().item():.4f}")
+                        print(f"  latents std: {latents.std().item():.4f}")
+                    
                     with self.accelerator.autocast():
-                        loss = self.diffusion(latents, classes=labels)
-                        loss = loss / config.gradient_accumulate_every
+                        # 计算扩散损失（如果启用对比学习，同时提取特征）
+                        if (config.use_contrastive_loss and 
+                            self.contrastive_criterion is not None and
+                            self.step >= config.contrastive_start_step):
+                            
+                            # 一次前向传播，同时计算损失和提取特征
+                            # 需要访问底层模型（去除Accelerator包装）
+                            unwrapped_diffusion = self.accelerator.unwrap_model(self.diffusion)
+                            
+                            # 随机时间步
+                            b = latents.shape[0]
+                            device = latents.device
+                            t = torch.randint(0, unwrapped_diffusion.num_timesteps, (b,), device=device).long()
+                            
+                            # 归一化（如果需要）
+                            img = unwrapped_diffusion.normalize(latents)
+                            
+                            # 调用p_losses，同时返回特征
+                            diffusion_loss, features = unwrapped_diffusion.p_losses(
+                                img, t, 
+                                classes=labels, 
+                                return_features=True
+                            )
+                            
+                            # 准备SupCon输入格式: [B, n_views, C]
+                            features = features.unsqueeze(1)  # [B, 1, C]
+                            
+                            # 计算SupCon损失
+                            contrastive_loss = self.contrastive_criterion(features, labels)
+                            contrastive_loss = contrastive_loss * config.contrastive_weight
+                        else:
+                            # 标准扩散损失（不提取特征）
+                            diffusion_loss = self.diffusion(latents, classes=labels)
+                            contrastive_loss = 0.
+                        
+                        # 混合损失
+                        loss = diffusion_loss + contrastive_loss
+                        
+                        # 记录各项损失（在除以gradient_accumulate_every之前）
                         total_loss += loss.item()
+                        total_diffusion_loss += diffusion_loss.item()
+                        if isinstance(contrastive_loss, torch.Tensor):
+                            total_contrastive_loss += contrastive_loss.item()
+                        
+                        # 为梯度累积缩放损失
+                        loss = loss / config.gradient_accumulate_every
                     
                     self.accelerator.backward(loss)
                 
@@ -384,9 +589,21 @@ class LatentDiffusionTrainer:
                 
                 self.accelerator.wait_for_everyone()
                 
-                # 更新进度
-                pbar.set_description(f'loss: {total_loss:.4f}')
+                # 更新进度（显示详细损失）
+                if config.use_contrastive_loss and self.step >= config.contrastive_start_step:
+                    pbar.set_description(
+                        f'loss: {total_loss:.4f} | '
+                        f'diff: {total_diffusion_loss:.4f} | '
+                        f'contr: {total_contrastive_loss:.4f}'
+                    )
+                else:
+                    pbar.set_description(f'loss: {total_loss:.4f}')
+                
                 self.step += 1
+                
+                # 记录对比学习损失
+                if config.use_contrastive_loss and total_contrastive_loss > 0:
+                    self.contrastive_loss_history.append(total_contrastive_loss)
                 
                 # 异常检测
                 if self.accelerator.is_main_process:
@@ -505,16 +722,27 @@ class LatentDiffusionTrainer:
                     'opt': self.opt.state_dict(),
                     'ema': self.ema.state_dict(),
                     'config': self.config.__dict__,
-                    'loss_history': self.loss_history[-100:]  # 保存最近100步loss
+                    'loss_history': self.loss_history[-100:],  # 保存最近100步loss
+                    'contrastive_loss_history': self.contrastive_loss_history[-100:]  # 保存对比学习损失
                 }
                 save_path = self.results_folder / f'model-{milestone}.pt'
                 torch.save(data, str(save_path))
                 print(f"✓ 检查点已保存: {save_path}")
                 
+                # 打印对比学习损失统计（如果启用）
+                if self.config.use_contrastive_loss and len(self.contrastive_loss_history) > 0:
+                    recent_contr_loss = sum(self.contrastive_loss_history[-100:]) / len(self.contrastive_loss_history[-100:])
+                    print(f"  对比学习损失（最近100步平均）: {recent_contr_loss:.4f}")
+                
                 # 同时保存最新检查点（覆盖）
                 latest_path = self.results_folder / 'model-latest.pt'
                 torch.save(data, str(latest_path))
                 print(f"✓ 最新检查点: {latest_path}")
+                
+                # 保存所有checkpoint（不删除）
+                # 120,000步训练将产生60个checkpoint
+                # 总存储空间约30GB（60个 × ~500MB）
+                print(f"  💾 保留所有checkpoint以便选择最佳模型")
                 
             except Exception as e:
                 print(f"  ✗ 保存检查点失败: {e}")
