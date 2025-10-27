@@ -38,15 +38,33 @@ def generate_samples(
     
     # 1. 加载基础SD模型
     print("\n1. 加载Stable Diffusion 1.5...")
+    import os
+    os.environ["TRANSFORMERS_OFFLINE"] = "0"
+    
     pipe = StableDiffusionPipeline.from_pretrained(
         "runwayml/stable-diffusion-v1-5",
         torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-        safety_checker=None  # 关闭安全检查器
+        safety_checker=None,  # 关闭安全检查器
+        use_safetensors=True,
+        variant="fp16"
     )
     
-    # 2. 加载LoRA权重
+    # 2. 加载LoRA权重（使用PEFT格式）
     print(f"\n2. 加载LoRA权重: {lora_weights}")
-    pipe.load_lora_weights(lora_weights)
+    from pathlib import Path
+    from peft import PeftModel
+    
+    lora_path = Path(lora_weights)
+    
+    # 如果是文件路径，取父目录
+    if lora_path.is_file():
+        lora_dir = lora_path.parent
+    else:
+        lora_dir = lora_path
+    
+    # 使用PEFT加载LoRA到UNet
+    print(f"  使用PEFT加载LoRA: {lora_dir}")
+    pipe.unet = PeftModel.from_pretrained(pipe.unet, lora_dir)
     
     # 3. 优化设置
     print("\n3. 配置生成参数...")
@@ -75,10 +93,11 @@ def generate_samples(
     
     print(f"   Prompt: '{prompt}'")
     
-    generator = torch.Generator(device=device).manual_seed(42)
-    
     for i in range(num_samples):
         print(f"   生成 {i+1}/{num_samples}...")
+        
+        # 每次生成使用不同的种子
+        generator = torch.Generator(device=device).manual_seed(42 + i)
         
         # 生成图像（512×512）
         image = pipe(
@@ -141,12 +160,35 @@ def generate_all_users(
     
     # 加载模型（只加载一次）
     print("\n加载模型...")
+    import os
+    os.environ["TRANSFORMERS_OFFLINE"] = "0"
+    
     pipe = StableDiffusionPipeline.from_pretrained(
         "runwayml/stable-diffusion-v1-5",
         torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-        safety_checker=None
+        safety_checker=None,
+        use_safetensors=True,
+        variant="fp16"
     )
-    pipe.load_lora_weights(lora_weights)
+    
+    # 加载LoRA权重（使用PEFT格式）
+    print(f"加载LoRA权重: {lora_weights}")
+    from pathlib import Path
+    from peft import PeftModel
+    
+    lora_path = Path(lora_weights)
+    
+    # 如果是文件路径，取父目录
+    if lora_path.is_file():
+        lora_dir = lora_path.parent
+    else:
+        lora_dir = lora_path
+    
+    # 使用PEFT加载LoRA到UNet
+    print(f"  使用PEFT加载LoRA: {lora_dir}")
+    pipe.unet = PeftModel.from_pretrained(pipe.unet, lora_dir)
+    
+    # 配置调度器
     pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
     
     if device == "cuda":
@@ -166,22 +208,39 @@ def generate_all_users(
         user_dir = output_path / f"ID_{user_id+1:02d}"
         user_dir.mkdir(exist_ok=True)
         
-        generator = torch.Generator(device=device).manual_seed(42 + user_id)
+        # 批量生成（每次生成batch_size张图像）
+        batch_size = 10  # 可以根据显存调整（1, 2, 4, 8）
+        num_batches = (samples_per_user + batch_size - 1) // batch_size
         
-        for i in range(samples_per_user):
-            image = pipe(
-                prompt=prompt,
+        sample_idx = 0
+        for batch_idx in range(num_batches):
+            current_batch_size = min(batch_size, samples_per_user - sample_idx)
+            
+            # 为batch中的每张图像设置不同的种子
+            generators = [
+                torch.Generator(device=device).manual_seed(42 + user_id * 1000 + sample_idx + j)
+                for j in range(current_batch_size)
+            ]
+            
+            # 批量生成
+            images = pipe(
+                prompt=[prompt] * current_batch_size,  # 重复prompt
                 num_inference_steps=num_inference_steps,
                 guidance_scale=guidance_scale,
-                generator=generator
-            ).images[0]
+                generator=generators
+            ).images
             
-            # Resize到256×256（如果需要）
-            if resize_to_256:
-                image = image.resize((256, 256), Image.LANCZOS)
+            # 保存每张图像
+            for j, image in enumerate(images):
+                # Resize到256×256（如果需要）
+                if resize_to_256:
+                    image = image.resize((256, 256), Image.LANCZOS)
+                
+                save_path = user_dir / f"sample_{sample_idx:03d}.png"
+                image.save(save_path)
+                sample_idx += 1
             
-            save_path = user_dir / f"sample_{i:03d}.png"
-            image.save(save_path)
+            print(f"  进度: {sample_idx}/{samples_per_user}")
         
         print(f"  ✓ 生成 {samples_per_user} 张图像")
     
