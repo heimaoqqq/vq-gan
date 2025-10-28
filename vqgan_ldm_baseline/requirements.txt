@@ -1,0 +1,24 @@
+# VQ-GAN + LDM Baseline Requirements
+# =====================================
+
+# Core
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.24.0
+
+# Training
+accelerate>=0.20.0
+tqdm>=4.65.0
+
+# Models
+einops>=0.6.0
+
+# Losses
+lpips>=0.1.4
+
+# Utils
+Pillow>=9.5.0
+
+# Optional (for better performance)
+# xformers>=0.0.20  # Flash Attention
+
