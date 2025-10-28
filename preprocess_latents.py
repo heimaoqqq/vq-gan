@@ -126,9 +126,23 @@ def preprocess_dataset(vae_path, data_path, output_folder, num_users=31,
         # === 分层均匀抽样：从时间序列中均匀选择样本 ===
         # 例如：150张图像中均匀选50张 → 索引=[0, 3, 6, 9, ..., 147]
         # 这样可以覆盖完整的步态周期，避免只采样某个局部时间段
-        train_indices = np.linspace(0, total_images - 1, 
-                                     min(images_per_user_train, total_images), 
-                                     dtype=int)
+        n_train = min(images_per_user_train, total_images)
+        train_indices_float = np.linspace(0, total_images - 1, n_train)
+        train_indices = np.round(train_indices_float).astype(int)
+        
+        # 去重并保持顺序（防止重复索引）
+        train_indices = np.unique(train_indices)
+        
+        # 如果去重后数量不足（极少见），从剩余索引中补充
+        if len(train_indices) < n_train:
+            all_indices = set(range(total_images))
+            remaining = list(all_indices - set(train_indices))
+            np.random.seed(seed + user_id)  # 可复现
+            additional = np.random.choice(remaining, 
+                                          n_train - len(train_indices), 
+                                          replace=False)
+            train_indices = np.sort(np.concatenate([train_indices, additional]))
+        
         train_indices_set = set(train_indices)
         
         # 训练集：均匀采样的图像
