@@ -31,7 +31,7 @@ class BaselineConfig(Config):
 
 
 if __name__ == '__main__':
-    from train_latent_cfg import train
+    from train_latent_cfg import LatentDiffusionTrainer
     
     config = BaselineConfig()
     
@@ -53,5 +53,7 @@ if __name__ == '__main__':
     print(f"  训练: batch={config.train_batch_size}×{config.gradient_accumulate_every}, lr={config.train_lr}")
     print("="*60 + "\n")
     
-    train(config)
+    # 创建训练器并开始训练
+    trainer = LatentDiffusionTrainer(config)
+    trainer.train()
 
