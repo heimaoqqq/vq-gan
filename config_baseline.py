@@ -7,6 +7,10 @@ from train_latent_cfg import Config
 class BaselineConfig(Config):
     """Baseline：关闭所有优化技术（仅保留基础LDM）"""
     
+    # === 路径配置（Kaggle环境）===
+    vae_path = '/kaggle/input/kl-vae-best-pt/kl_vae_best.pt'  # KL-VAE路径
+    data_path = '/kaggle/input/organized-gait-dataset/Normal_line'
+    
     # === 关闭所有优化技术 ===
     cond_drop_prob = 0.0  # ❌ 关闭CFG
     
