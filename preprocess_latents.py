@@ -1,10 +1,29 @@
 """
 预编码脚本 - 将所有图像编码为潜在表示并缓存
-同时保存训练集/测试集划分信息，方便后续分类器实验
+=====================================================
+
+数据划分策略：分层均匀抽样（Stratified Uniform Sampling）
+-----------------------------------------------------
+适用场景：步态微多普勒时间序列数据
+
+原理：
+  - 每个用户有150张连续采集的时频图像（时间序列）
+  - 从中均匀选择50张作为训练集，覆盖完整步态周期
+  - 剩余100张作为测试集，确保训练/测试完全分离
+
+采样方法：
+  使用 np.linspace(0, 149, 50) 生成均匀间隔的索引
+  例如：[0, 3, 6, 9, ..., 147] - 间隔约3张图像
+
+优势：
+  ✓ 覆盖完整步态周期（起步、加速、稳定、减速）
+  ✓ 避免采样偏差（不会只采样某个局部时间段）
+  ✓ 可复现（固定索引，非随机）
+  ✓ 训练/测试完全独立（无重叠）
 
 输出：
   1. latents_cache/ - 所有图像的潜在表示（训练+测试）
-  2. data_split.json - 数据集划分信息
+  2. data_split.json - 数据集划分信息（含采样索引）
 """
 
 import os
@@ -83,8 +102,11 @@ def preprocess_dataset(vae_path, data_path, output_folder, num_users=31,
     }
     
     print(f"Collecting and splitting image paths for {num_users} users...")
-    print(f"  Train: {images_per_user_train} images/user")
-    print(f"  Test: remaining images/user")
+    print(f"  采样方法: 分层均匀抽样（覆盖完整步态周期）")
+    print(f"  Train: {images_per_user_train} images/user (均匀分布)")
+    print(f"  Test: remaining images/user (训练集外的所有图像)")
+    
+    data_split_info['sampling_method'] = 'stratified_uniform'
     
     for user_id in range(1, num_users + 1):
         user_folder = data_path / f"ID_{user_id}"
@@ -93,26 +115,37 @@ def preprocess_dataset(vae_path, data_path, output_folder, num_users=31,
             print(f"  Warning: {user_folder} not found, skipping...")
             continue
         
-        # 收集该用户的所有jpg图像
+        # 收集该用户的所有jpg图像（排序保证时间序列一致性）
         image_paths = sorted(list(user_folder.glob("*.jpg")))
+        total_images = len(image_paths)
         
-        # 为每个用户设置独立但可复现的随机种子
-        user_seed = seed + user_id
-        rng = np.random.RandomState(user_seed)
+        if total_images == 0:
+            print(f"  Warning: No images found in {user_folder}, skipping...")
+            continue
         
-        # 随机打乱
-        indices = rng.permutation(len(image_paths))
-        image_paths_shuffled = [image_paths[i] for i in indices]
+        # === 分层均匀抽样：从时间序列中均匀选择样本 ===
+        # 例如：150张图像中均匀选50张 → 索引=[0, 3, 6, 9, ..., 147]
+        # 这样可以覆盖完整的步态周期，避免只采样某个局部时间段
+        train_indices = np.linspace(0, total_images - 1, 
+                                     min(images_per_user_train, total_images), 
+                                     dtype=int)
+        train_indices_set = set(train_indices)
         
-        # 划分训练/测试集
-        train_paths = image_paths_shuffled[:images_per_user_train]
-        test_paths = image_paths_shuffled[images_per_user_train:]
+        # 训练集：均匀采样的图像
+        train_paths = [image_paths[i] for i in train_indices]
         
-        # 保存划分信息
+        # 测试集：训练集外的所有图像（完全分离）
+        test_paths = [image_paths[i] for i in range(total_images) 
+                     if i not in train_indices_set]
+        
+        # 保存划分信息（包含索引以便验证）
         data_split_info['users'][f'ID_{user_id}'] = {
             'user_id': user_id,
             'label': user_id - 1,
-            'total_images': len(image_paths),
+            'total_images': total_images,
+            'train_count': len(train_paths),
+            'test_count': len(test_paths),
+            'train_indices': train_indices.tolist(),  # 记录采样索引
             'train_images': [str(p.relative_to(data_path)) for p in train_paths],
             'test_images': [str(p.relative_to(data_path)) for p in test_paths]
         }
@@ -128,10 +161,15 @@ def preprocess_dataset(vae_path, data_path, output_folder, num_users=31,
     # 合并训练和测试样本
     all_samples = train_samples + (test_samples if encode_all else [])
     
-    print(f"\nDataset split:")
-    print(f"  Train: {len(train_samples)} images")
-    print(f"  Test: {len(test_samples)} images")
-    print(f"  Total to encode: {len(all_samples)} images\n")
+    print(f"\n{'='*60}")
+    print(f"数据集划分统计:")
+    print(f"{'='*60}")
+    print(f"  采样方法: 分层均匀抽样（stratified_uniform）")
+    print(f"  训练集: {len(train_samples)} 张 ({num_users}用户 × {images_per_user_train}张/用户)")
+    print(f"  测试集: {len(test_samples)} 张 (训练集外的所有图像)")
+    print(f"  总计编码: {len(all_samples)} 张")
+    print(f"  训练/测试完全分离: ✓")
+    print(f"{'='*60}\n")
     
     # 保存数据集划分信息
     split_file = Path(output_folder) / 'data_split.json'
