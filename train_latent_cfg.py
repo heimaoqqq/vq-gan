@@ -103,6 +103,7 @@ class Config:
     train_num_steps = 66000  # 训练步数：约1500 epochs，避免过拟合，33个checkpoint
     
     # === 优化配置（防止过拟合 + 增加多样性）===
+    use_ema = True  # 是否使用EMA（Baseline设为False）
     ema_decay = 0.999  # EMA平滑：降低平滑系数，增加多样性
     ema_update_every = 10  # EMA更新频率
     max_grad_norm = 1.0  # 梯度裁剪：防止梯度爆炸
@@ -465,14 +466,17 @@ class LatentDiffusionTrainer:
             self.diffusion, self.opt, self.train_dl
         )
         
-        # EMA（仅主进程）
-        if self.accelerator.is_main_process:
+        # EMA（仅主进程，可选）
+        self.use_ema = config.use_ema
+        if self.use_ema and self.accelerator.is_main_process:
             self.ema = EMA(
                 self.diffusion,
                 beta=config.ema_decay,
                 update_every=config.ema_update_every
             )
             self.ema.to(self.accelerator.device)
+        else:
+            self.ema = None
         
         # 创建结果文件夹
         self.results_folder = Path(config.results_folder)
@@ -610,7 +614,7 @@ class LatentDiffusionTrainer:
                     self._check_training_health(total_loss)
                 
                 # EMA更新
-                if self.accelerator.is_main_process:
+                if self.ema and self.accelerator.is_main_process:
                     self.ema.update()
                     
                     # 定期保存和采样
@@ -667,7 +671,9 @@ class LatentDiffusionTrainer:
     
     def save_and_sample(self, milestone):
         """保存检查点并生成样本"""
-        self.ema.ema_model.eval()
+        # 使用EMA模型或原始模型采样
+        model_for_sample = self.ema.ema_model if self.ema else self.diffusion
+        model_for_sample.eval()
         
         print(f"\n{'='*60}")
         print(f"Checkpoint {milestone} (步数: {self.step})")
@@ -681,7 +687,7 @@ class LatentDiffusionTrainer:
                 user_ids = torch.arange(num_samples, device=self.accelerator.device)
                 
                 # DDPM采样（条件扩散 + DDIM + CFG）
-                sampled_latents = self.ema.ema_model.sample(
+                sampled_latents = model_for_sample.sample(
                     classes=user_ids,              # 条件：用户ID
                     cond_scale=self.config.cond_scale,  # CFG强度
                     rescaled_phi=self.config.rescaled_phi  # CFG++ rescaling
@@ -720,11 +726,12 @@ class LatentDiffusionTrainer:
                     'step': self.step,
                     'model': self.accelerator.get_state_dict(self.diffusion),
                     'opt': self.opt.state_dict(),
-                    'ema': self.ema.state_dict(),
                     'config': self.config.__dict__,
                     'loss_history': self.loss_history[-100:],  # 保存最近100步loss
                     'contrastive_loss_history': self.contrastive_loss_history[-100:]  # 保存对比学习损失
                 }
+                if self.ema:
+                    data['ema'] = self.ema.state_dict()
                 save_path = self.results_folder / f'model-{milestone}.pt'
                 torch.save(data, str(save_path))
                 print(f"✓ 检查点已保存: {save_path}")
@@ -760,7 +767,7 @@ class LatentDiffusionTrainer:
         self.step = data['step']
         self.opt.load_state_dict(data['opt'])
         
-        if self.accelerator.is_main_process:
+        if self.ema and self.accelerator.is_main_process and 'ema' in data:
             self.ema.load_state_dict(data['ema'])
         
         print(f"Loaded checkpoint from {load_path}, step {self.step}")
