@@ -228,10 +228,10 @@ def main():
     # 生成参数
     parser.add_argument('--num_samples', type=int, default=10,
                         help='Number of samples to generate (for single user)')
-    parser.add_argument('--samples_per_user', type=int, default=5,
-                        help='Samples per user (for all users mode)')
-    parser.add_argument('--cond_scale', type=float, default=3.0,
-                        help='Classifier-free guidance scale (推荐2.0-5.0，默认3.0平衡多样性和条件遵循)')
+    parser.add_argument('--samples_per_user', type=int, default=50,
+                        help='Samples per user (for all users mode, default=50)')
+    parser.add_argument('--cond_scale', type=float, default=1.5,
+                        help='CFG scale (1.0=无CFG/Baseline, 1.5=优化版默认, 更高=更强条件)')
     
     # 路径参数
     parser.add_argument('--vae_path', type=str,
@@ -274,71 +274,61 @@ def main():
         samples_per_user = args.num_samples
         print(f"Generating {samples_per_user} samples for user {args.user_id}...")
     
-    # 批量生成
-    all_generated = []
-    all_user_ids = []
+    # 为每个用户生成并立即保存（实时反馈）
+    from PIL import Image
+    total_images_generated = 0
     
-    for user_id in tqdm(user_list, desc="Generating"):
-        # 为该用户生成多个样本
-        user_ids = [user_id] * samples_per_user
+    print("开始生成图像（每个用户完成后立即保存）...\n")
+    
+    for user_id in tqdm(user_list, desc="用户进度"):
+        # 创建用户文件夹：user 0 -> ID_1, user 1 -> ID_2, ...
+        actual_id = user_id + 1  # 0→ID_1, 1→ID_2, ..., 30→ID_31
+        user_folder = output_dir / f'ID_{actual_id}'
+        user_folder.mkdir(exist_ok=True, parents=True)
+        
+        # 为该用户生成samples_per_user张图像
+        user_images = []
         
         # 分批生成（避免显存溢出）
-        for i in range(0, len(user_ids), args.batch_size):
-            batch_user_ids = user_ids[i:i+args.batch_size]
+        for batch_idx in range(0, samples_per_user, args.batch_size):
+            n_batch = min(args.batch_size, samples_per_user - batch_idx)
+            batch_user_ids = [user_id] * n_batch
+            
+            # 采样
             images = generate_samples(
                 diffusion, vae, batch_user_ids,
                 cond_scale=args.cond_scale,
                 device=device
             )
-            all_generated.append(images.cpu())
-            all_user_ids.extend(batch_user_ids)
-    
-    # 合并所有生成的图像
-    all_generated = torch.cat(all_generated, dim=0)
-    print(f"Generated {len(all_generated)} images")
-    
-    # 保存图像（默认保存为独立文件）
-    if args.save_grid:
-        # 保存为网格（可选）
-        grid_path = output_dir / f'generated_grid_scale{args.cond_scale}.png'
-        utils.save_image(
-            all_generated,
-            str(grid_path),
-            nrow=samples_per_user
-        )
-        print(f"Saved grid to {grid_path}")
-    
-    # 总是保存独立图像文件到用户子文件夹
-    print("Saving individual images to user subfolders...")
-    sample_counts = {}  # 跟踪每个用户的样本计数
-    
-    for img, user_id in zip(all_generated, all_user_ids):
-        # 为每个用户维护独立的样本计数
-        if user_id not in sample_counts:
-            sample_counts[user_id] = 0
+            
+            # 立即保存该批次图像
+            for i in range(n_batch):
+                img_idx = batch_idx + i
+                save_path = user_folder / f'generated_{img_idx:03d}.jpg'
+                
+                # 转换为PIL Image并保存为JPG（256×256）
+                img_tensor = images[i].clamp(0, 1).cpu()
+                img_np = (img_tensor.numpy() * 255).astype(np.uint8)
+                img_np = img_np.transpose(1, 2, 0)  # [C,H,W] → [H,W,C]
+                
+                img_pil = Image.fromarray(img_np, mode='RGB')
+                img_pil.save(str(save_path), quality=95)
+                
+                total_images_generated += 1
+            
+            user_images.append(images.cpu())
         
-        # 创建用户子文件夹：user 0 -> ID_1, user 1 -> ID_2, ...
-        user_folder = output_dir / f'ID_{user_id + 1}'
-        user_folder.mkdir(exist_ok=True, parents=True)
-        
-        # 保存到用户文件夹下，文件名包含用户ID
-        save_path = user_folder / f'user_{user_id}_sample_{sample_counts[user_id]:03d}.png'
-        
-        # 使用和训练时相同的方法保存，但只传入单个图像
-        # 确保img有batch维度 [1, 3, 256, 256]
-        if img.dim() == 3:  # [3, 256, 256] -> [1, 3, 256, 256]
-            single_img = img.unsqueeze(0)
-        else:
-            single_img = img
-        
-        # 使用和训练时完全相同的保存方法
-        utils.save_image(single_img, str(save_path))
-        sample_counts[user_id] += 1
+        # 该用户完成，输出提示
+        tqdm.write(f"  ✓ ID_{actual_id}: {samples_per_user}张已保存 → {user_folder}/")
     
-    print(f"✓ Saved {len(all_generated)} individual images to {output_dir}")
-    print(f"✓ Generated samples for {len(sample_counts)} users")
-    
-    print("Generation complete!")
+    print(f"\n{'='*60}")
+    print("生成完成！")
+    print(f"{'='*60}")
+    print(f"  总计生成: {total_images_generated}张")
+    print(f"  输出目录: {output_dir}/")
+    print(f"  输出格式: ID_X/generated_XXX.jpg (256×256)")
+    print(f"  CFG设置: cond_scale={args.cond_scale}")
+    print(f"{'='*60}")
 
 
 if __name__ == '__main__':
