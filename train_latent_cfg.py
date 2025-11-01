@@ -63,7 +63,7 @@ class Config:
     """集中管理所有配置参数"""
     
     # === 路径配置 ===
-    vae_path = '/kaggle/input/kl-vae/kl_vae_best.pt'
+    vae_path = '/kaggle/input/kl-vae-best-pt/kl_vae_best.pt'
     data_path = '/kaggle/input/organized-gait-dataset/Normal_line'
     results_folder = './results'
     latents_cache_folder = './latents_cache'  # 预处理缓存
