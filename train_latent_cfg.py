@@ -84,7 +84,12 @@ class Config:
     dim_mults = (1, 2, 4, 4)  # 4层结构：避免最后一层过大
     attn_dim_head = 64  # 注意力头维度：增加到64以匹配classes_dim=384（64×8=512>384）
     attn_heads = 8  # 增加注意力头数：更好捕捉用户间微妙差异
-    cond_drop_prob = 0.2  # CFG条件丢弃：0.2适配用户间差异小的数据集
+    cond_drop_prob = 0.0  # ❌ 关闭CFG训练（极小数据集应专注于conditional质量）
+    # 分析：
+    #   - 我们的目标：条件生成（需要强大的conditional分支）
+    #   - CFG训练会削弱conditional（50→35张/类，减少30%）
+    #   - 对于50张/类的极小数据集，不应该为CFG牺牲conditional训练
+    #   - 结论：放弃CFG，全力训练conditional
     
     # === 扩散配置 ===
     timesteps = 1000
@@ -92,19 +97,23 @@ class Config:
     objective = 'pred_v'  # v-prediction
     beta_schedule = 'cosine'
     # === 采样配置 ===
-    # 用户间差异小 → 需要适中的CFG强度来强化微弱的条件信号
-    cond_scale = 7.5  # CFG强度：7.5强化细粒度条件信号
-    rescaled_phi = 0.7  # CFG++ rescaling：标准值，适配cond_scale=7.5
+    # cond_drop=0.0时，不用CFG
+    cond_scale = 1.0  # 不用CFG（未训练unconditional）
+    rescaled_phi = 0.0  # 不用CFG++
     
     # === 训练配置（针对RTX 5880 48GB + 小数据集优化）===
     train_batch_size = 12  # batch size：模型44M参数，48GB显存绰绰有余
     gradient_accumulate_every = 3  # 梯度累积：有效batch=36，保持训练稳定性
-    train_lr = 4e-5  # 学习率：配合cond_drop_prob=0.2，略微提高以加快收敛
-    train_num_steps = 66000  # 训练步数：约1500 epochs，避免过拟合，33个checkpoint
+    train_lr = 4e-5  # 学习率：标准值
+    train_num_steps = 60000  # 训练步数：约1290 epochs
+    
+    # Learning Rate Schedule
+    use_lr_warmup = True  # 使用学习率warmup
+    warmup_steps = 1000  # 前1000步warmup
     
     # === 优化配置（防止过拟合 + 增加多样性）===
     use_ema = True  # 是否使用EMA（Baseline设为False）
-    ema_decay = 0.999  # EMA平滑：降低平滑系数，增加多样性
+    ema_decay = 0.995  # EMA平滑：小数据集降低decay，增加多样性（0.999→0.995）
     ema_update_every = 10  # EMA更新频率
     max_grad_norm = 1.0  # 梯度裁剪：防止梯度爆炸
     adam_betas = (0.9, 0.99)  # Adam优化器参数
@@ -116,23 +125,21 @@ class Config:
     min_snr_gamma = 5  # gamma=5适合小数据集
     
     # === 对比学习配置 ===
-    # 针对微多普勒数据集优化：用户间差异小，需要强对比学习
-    use_contrastive_loss = True  # 是否使用对比学习损失
-    contrastive_weight = 0.08  # 对比学习损失权重（配合cond_drop_prob=0.2）
-    # 权重说明：
-    #   - 0.03: 极度保守（推荐，配合K-Medoids，目标对比占比20-25%）
-    #   - 0.05: 非常保守（可能导致对比占比30-40%）
-    #   - 0.08: 保守（可能导致对比占比40-50%）
-    #   - 0.1: 标准（可能导致对比占比>50%）
-    contrastive_temperature = 0.07  # SupCon温度参数
-    # 温度说明：
-    #   - 0.05: 更强对比，更尖锐的分布（适合差异极小的数据）
-    #   - 0.07: 标准值（推荐）
-    #   - 0.1: 更弱对比，更平滑的分布
-    contrastive_start_step = 2000  # 从第几步开始使用对比学习（约45 epochs后启动）
-    # 开始步数说明：
-    #   - 0: 从头开始（充分利用对比学习）
-    #   - 5000: 延迟启动（推荐，让扩散模型先稳定，配合K-Medoids）
+    # ⚠️ 关键发现：对比学习导致模式崩溃（所有用户生成相似图像）
+    use_contrastive_loss = False  # ❌ 关闭对比学习（实验证明：降低用户特色）
+    contrastive_weight = 0.0  # 权重设为0
+    # 问题诊断：
+    #   - 对比学习过度优化"同类相似"目标
+    #   - 导致生成"平均模式"而非真实用户特征
+    #   - Baseline（无对比学习）反而保留更多用户特色
+    
+    contrastive_temperature = 0.07  # SupCon温度参数（标准值）
+    
+    contrastive_start_step = 5000  # 延迟启动（2000→5000，让扩散先稳定）
+    # 调整理由：
+    #   - 小数据集需要扩散模型先学会基本生成能力
+    #   - 过早加入对比学习可能干扰扩散训练
+    #   - 5000步≈107 epochs，扩散模型已基本稳定
     
     # === 归一化配置 ===
     # ⚠️ 重要：运行 test_vae_range.py 确定此参数！
@@ -141,7 +148,7 @@ class Config:
     auto_normalize = False  # 默认False，运行test_vae_range.py后根据结果调整
     
     # === 监控配置 ===
-    save_and_sample_every = 2000  # 每2000步保存一次（约45 epochs）
+    save_and_sample_every = 1000  # 每1000步保存（小数据集更频繁观察，避免错过最佳点）
     num_samples = 16  # 生成16张检查
     
     # === 其他 ===
@@ -163,6 +170,10 @@ class Config:
         print(f"\nCFG: drop={self.cond_drop_prob}, scale={self.cond_scale}")
         
         print(f"\n训练: batch={self.train_batch_size}×{self.gradient_accumulate_every}, lr={self.train_lr}, steps={self.train_num_steps:,}")
+        
+        # LR Warmup
+        if self.use_lr_warmup:
+            print(f"\nLR Warmup: {self.warmup_steps}步")
         
         # 对比学习配置
         if self.use_contrastive_loss:
@@ -591,6 +602,13 @@ class LatentDiffusionTrainer:
                 self.opt.step()
                 self.opt.zero_grad()
                 
+                # Learning Rate Warmup（小数据集稳定训练）
+                if config.use_lr_warmup and self.step < config.warmup_steps:
+                    # 线性warmup
+                    lr_scale = (self.step + 1) / config.warmup_steps
+                    for param_group in self.opt.param_groups:
+                        param_group['lr'] = config.train_lr * lr_scale
+                
                 self.accelerator.wait_for_everyone()
                 
                 # 更新进度（显示详细损失）
@@ -616,8 +634,9 @@ class LatentDiffusionTrainer:
                 # EMA更新
                 if self.ema and self.accelerator.is_main_process:
                     self.ema.update()
-                    
-                    # 定期保存和采样
+                
+                # 定期保存和采样（不依赖EMA）
+                if self.accelerator.is_main_process:
                     if self.step % config.save_and_sample_every == 0:
                         self.save_and_sample(self.step // config.save_and_sample_every)
                 
@@ -718,41 +737,42 @@ class LatentDiffusionTrainer:
                 
         except Exception as e:
             print(f"  ✗ 生成样本失败: {e}")
+            import traceback
+            traceback.print_exc()
         
         # 保存检查点
-        if self.accelerator.is_local_main_process:
-            try:
-                data = {
-                    'step': self.step,
-                    'model': self.accelerator.get_state_dict(self.diffusion),
-                    'opt': self.opt.state_dict(),
-                    'config': self.config.__dict__,
-                    'loss_history': self.loss_history[-100:],  # 保存最近100步loss
-                    'contrastive_loss_history': self.contrastive_loss_history[-100:]  # 保存对比学习损失
-                }
-                if self.ema:
-                    data['ema'] = self.ema.state_dict()
-                save_path = self.results_folder / f'model-{milestone}.pt'
-                torch.save(data, str(save_path))
-                print(f"✓ 检查点已保存: {save_path}")
-                
-                # 打印对比学习损失统计（如果启用）
-                if self.config.use_contrastive_loss and len(self.contrastive_loss_history) > 0:
-                    recent_contr_loss = sum(self.contrastive_loss_history[-100:]) / len(self.contrastive_loss_history[-100:])
-                    print(f"  对比学习损失（最近100步平均）: {recent_contr_loss:.4f}")
-                
-                # 同时保存最新检查点（覆盖）
-                latest_path = self.results_folder / 'model-latest.pt'
-                torch.save(data, str(latest_path))
-                print(f"✓ 最新检查点: {latest_path}")
-                
-                # 保存所有checkpoint（不删除）
-                # 120,000步训练将产生60个checkpoint
-                # 总存储空间约30GB（60个 × ~500MB）
-                print(f"  💾 保留所有checkpoint以便选择最佳模型")
-                
-            except Exception as e:
-                print(f"  ✗ 保存检查点失败: {e}")
+        try:
+            data = {
+                'step': self.step,
+                'model': self.accelerator.get_state_dict(self.diffusion),
+                'opt': self.opt.state_dict(),
+                'config': self.config.__dict__,
+                'loss_history': self.loss_history[-100:],  # 保存最近100步loss
+                'contrastive_loss_history': self.contrastive_loss_history[-100:]  # 保存对比学习损失
+            }
+            if self.ema:
+                data['ema'] = self.ema.state_dict()
+            save_path = self.results_folder / f'model-{milestone}.pt'
+            torch.save(data, str(save_path))
+            print(f"✓ 检查点已保存: {save_path}")
+            
+            # 打印对比学习损失统计（如果启用）
+            if self.config.use_contrastive_loss and len(self.contrastive_loss_history) > 0:
+                recent_contr_loss = sum(self.contrastive_loss_history[-100:]) / len(self.contrastive_loss_history[-100:])
+                print(f"  对比学习损失（最近100步平均）: {recent_contr_loss:.4f}")
+            
+            # 同时保存最新检查点（覆盖）
+            latest_path = self.results_folder / 'model-latest.pt'
+            torch.save(data, str(latest_path))
+            print(f"✓ 最新检查点: {latest_path}")
+            
+            # 保存所有checkpoint（不删除）
+            print(f"  💾 保留所有checkpoint以便选择最佳模型")
+            
+        except Exception as e:
+            print(f"  ✗ 保存检查点失败: {e}")
+            import traceback
+            traceback.print_exc()
         
         print(f"{'='*60}\n")
     
