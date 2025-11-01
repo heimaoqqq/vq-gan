@@ -735,11 +735,17 @@ class GaussianDiffusion(nn.Module):
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
     def model_predictions(self, x, t, classes, cond_scale = 6., rescaled_phi = 0.7, clip_x_start = False):
-        model_output, model_output_null = self.model.forward_with_cond_scale(x, t, classes, cond_scale = cond_scale, rescaled_phi = rescaled_phi)
+        # 当cond_scale=1.0时，直接使用conditional输出（不需要CFG）
+        if cond_scale == 1.0:
+            model_output = self.model(x, t, classes)
+            model_output_null = None
+        else:
+            model_output, model_output_null = self.model.forward_with_cond_scale(x, t, classes, cond_scale = cond_scale, rescaled_phi = rescaled_phi)
+        
         maybe_clip = partial(torch.clamp, min = -1., max = 1.) if clip_x_start else identity
 
         if self.objective == 'pred_noise':
-            pred_noise = model_output if not self.use_cfg_plus_plus else model_output_null
+            pred_noise = model_output if (not self.use_cfg_plus_plus or model_output_null is None) else model_output_null
 
             x_start = self.predict_start_from_noise(x, t, model_output)
             x_start = maybe_clip(x_start)
@@ -747,7 +753,7 @@ class GaussianDiffusion(nn.Module):
         elif self.objective == 'pred_x0':
             x_start = model_output
             x_start = maybe_clip(x_start)
-            x_start_for_pred_noise = x_start if not self.use_cfg_plus_plus else maybe_clip(model_output_null)
+            x_start_for_pred_noise = x_start if (not self.use_cfg_plus_plus or model_output_null is None) else maybe_clip(model_output_null)
 
             pred_noise = self.predict_noise_from_start(x, t, x_start_for_pred_noise)
 
@@ -757,7 +763,7 @@ class GaussianDiffusion(nn.Module):
             x_start = maybe_clip(x_start)
 
             x_start_for_pred_noise = x_start
-            if self.use_cfg_plus_plus:
+            if self.use_cfg_plus_plus and model_output_null is not None:
                 x_start_for_pred_noise = self.predict_start_from_v(x, t, model_output_null)
                 x_start_for_pred_noise = maybe_clip(x_start_for_pred_noise)
 
