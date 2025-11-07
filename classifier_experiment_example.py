@@ -374,7 +374,7 @@ def main():
                         help='合成数据文件夹（可选，用于增强实验）')
     parser.add_argument('--num_users', type=int, default=None,
                         help='使用的用户数量（如果提供合成数据，自动匹配合成数据的用户数）')
-    parser.add_argument('--batch_size', type=int, default=64,
+    parser.add_argument('--batch_size', type=int, default=16,
                         help='训练batch size（默认64，适中的baseline便于突出合成数据的提升）')
     parser.add_argument('--epochs', type=int, default=15)
     parser.add_argument('--lr', type=float, default=1e-4)
