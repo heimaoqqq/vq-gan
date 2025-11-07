@@ -242,14 +242,14 @@ def extract_features_for_users(model, data_loader, device, target_users=None, ma
     return features, labels
 
 
-def evaluate_classifier(model, test_loader, device, visualize=True):
+def evaluate_classifier(model, test_loader, device, num_classes, visualize=True):
     """评估分类器，包含过拟合检查和可视化"""
     model.eval()
     
     correct = 0
     total = 0
-    per_class_correct = [0] * 31
-    per_class_total = [0] * 31
+    per_class_correct = [0] * num_classes
+    per_class_total = [0] * num_classes
     
     # 收集预测置信度分布
     all_confidences = []
@@ -298,14 +298,14 @@ def evaluate_classifier(model, test_loader, device, visualize=True):
     
     # 每个用户的准确率
     print("\n各用户准确率:")
-    for i in range(31):
+    for i in range(num_classes):
         if per_class_total[i] > 0:
             acc = 100. * per_class_correct[i] / per_class_total[i]
             print(f"  用户{i:2d}: {acc:5.2f}% ({per_class_correct[i]}/{per_class_total[i]})")
     
     # 计算每个用户的准确率（百分比）
     per_class_accuracy = []
-    for i in range(31):
+    for i in range(num_classes):
         if per_class_total[i] > 0:
             acc = 100. * per_class_correct[i] / per_class_total[i]
             per_class_accuracy.append(acc)
@@ -323,24 +323,27 @@ def evaluate_classifier(model, test_loader, device, visualize=True):
 class SyntheticDataset(Dataset):
     """
     加载生成的合成图像
+    支持格式：ID_X/sample_XXX.png 或 ID_X/generated_XXX.jpg
     """
     def __init__(self, synthetic_folder, transform=None):
         self.samples = []
         
         synthetic_path = Path(synthetic_folder)
         
-        # 搜索子文件夹中的图像：ID_X/user_Y_sample_Z.png
+        # 搜索子文件夹中的图像：ID_X/*.png 或 ID_X/*.jpg
         for user_folder in sorted(synthetic_path.glob("ID_*")):
             if user_folder.is_dir():
-                for img_path in sorted(user_folder.glob("user_*_sample_*.png")):
-                    # 从文件名解析用户ID: user_Y_sample_Z.png
-                    parts = img_path.stem.split('_')
-                    if len(parts) >= 2 and parts[0] == 'user':
-                        label = int(parts[1])
-                        self.samples.append((img_path, label))
+                # 从文件夹名解析用户ID：ID_1 → label=0, ID_2 → label=1
+                user_id = int(user_folder.name.split('_')[1])  # ID_1 → 1
+                label = user_id - 1  # ID_1 → label=0
+                
+                # 加载该用户文件夹下的所有图像（支持png和jpg）
+                img_files = list(user_folder.glob("*.png")) + list(user_folder.glob("*.jpg"))
+                for img_path in sorted(img_files):
+                    self.samples.append((img_path, label))
         
         self.transform = transform
-        print(f"Loaded synthetic dataset: {len(self.samples)} images")
+        print(f"✓ 加载合成数据集: {len(self.samples)}张图像，{len(set(l for _, l in self.samples))}个用户")
     
     def __len__(self):
         return len(self.samples)
@@ -369,7 +372,10 @@ def main():
                         help='数据集划分文件')
     parser.add_argument('--synthetic_folder', type=str, default=None,
                         help='合成数据文件夹（可选，用于增强实验）')
-    parser.add_argument('--batch_size', type=int, default=16)
+    parser.add_argument('--num_users', type=int, default=None,
+                        help='使用的用户数量（如果提供合成数据，自动匹配合成数据的用户数）')
+    parser.add_argument('--batch_size', type=int, default=64,
+                        help='训练batch size（默认64，适中的baseline便于突出合成数据的提升）')
     parser.add_argument('--epochs', type=int, default=15)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--device', type=str, default='cuda')
@@ -395,7 +401,15 @@ def main():
         use_latents=False
     )
     
-    # 如果提供了合成数据，添加到训练集
+    # 测试集（真实图像）
+    test_ds = MicroDopplerDataset(
+        data_root=args.data_root,
+        split_file=args.split_file,
+        split='test',
+        use_latents=False
+    )
+    
+    # 如果提供了合成数据，自动检测用户数并过滤真实数据
     if args.synthetic_folder:
         print("\n添加合成数据到训练集...")
         
@@ -405,42 +419,68 @@ def main():
             transform=train_ds.transform
         )
         
+        # 自动检测合成数据的用户数
+        synthetic_users = set(label for _, label in synthetic_ds.samples)
+        num_synthetic_users = len(synthetic_users)
+        max_label = max(synthetic_users)
+        
+        print(f"检测到合成数据包含 {num_synthetic_users} 个用户（label 0-{max_label}）")
+        
+        # 如果未指定num_users，自动使用合成数据的用户数
+        if args.num_users is None:
+            args.num_users = max_label + 1  # label从0开始，所以+1
+            print(f"自动设置为使用前 {args.num_users} 个用户")
+        
+        # 过滤真实数据，只保留前num_users个用户
+        print(f"过滤真实数据，只保留前 {args.num_users} 个用户（label 0-{args.num_users-1}）...")
+        train_ds.samples = [(path, label) for path, label in train_ds.samples if label < args.num_users]
+        test_ds.samples = [(path, label) for path, label in test_ds.samples if label < args.num_users]
+        
+        print(f"过滤后训练集: {len(train_ds)} 张真实图像")
+        print(f"过滤后测试集: {len(test_ds)} 张真实图像")
+        
         # 合并数据集
         train_ds = ConcatDataset([train_ds, synthetic_ds])
         print(f"增强后训练集: {len(train_ds)} 张（真实+合成）")
+    elif args.num_users is not None:
+        # 没有合成数据，但指定了num_users，也过滤
+        print(f"\n过滤数据，只使用前 {args.num_users} 个用户（label 0-{args.num_users-1}）...")
+        train_ds.samples = [(path, label) for path, label in train_ds.samples if label < args.num_users]
+        test_ds.samples = [(path, label) for path, label in test_ds.samples if label < args.num_users]
+        print(f"过滤后训练集: {len(train_ds)} 张图像")
+        print(f"过滤后测试集: {len(test_ds)} 张图像")
     
-    # 测试集（真实图像）
-    test_ds = MicroDopplerDataset(
-        data_root=args.data_root,
-        split_file=args.split_file,
-        split='test',
-        use_latents=False
-    )
+    # 自动推断类别数量（从数据集中获取）
+    if isinstance(train_ds, ConcatDataset):
+        # ConcatDataset包含多个子数据集，从第一个（真实数据集）获取
+        all_labels = [label for _, label in train_ds.datasets[0].samples]
+    else:
+        all_labels = [label for _, label in train_ds.samples]
+    num_classes = len(set(all_labels))
+    print(f"\n检测到 {num_classes} 个用户类别")
     
-    # 创建DataLoader
+    # 创建DataLoader（Windows系统使用num_workers=0避免多进程问题）
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size,
-        shuffle=True, num_workers=4, pin_memory=True
+        shuffle=True, num_workers=0, pin_memory=True
     )
     
     test_loader = DataLoader(
         test_ds, batch_size=args.batch_size,
-        shuffle=False, num_workers=4, pin_memory=True
+        shuffle=False, num_workers=0, pin_memory=True
     )
     
     # 创建ResNet18分类器
-    print("\n创建ResNet18分类器（不使用预训练）...")
-    model = resnet18(weights=None, num_classes=31)
+    print(f"\n创建ResNet18分类器（不使用预训练，{num_classes}个类别）...")
+    model = resnet18(weights=None, num_classes=num_classes)
     model = model.to(device)
     
     # 优化器和损失函数
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)  # 移除weight_decay
     
-    # 学习率调度器：在训练loss停止下降时降低学习率
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=3
-    )
+    # 不使用学习率调度器（避免正则化效果）
+    scheduler = None
     
     # 训练
     print("\n开始训练...")
@@ -450,7 +490,7 @@ def main():
     
     # 训练完成后进行测试（包含t-SNE可视化）
     print("\n评估分类器...")
-    accuracy = evaluate_classifier(model, test_loader, device, visualize=True)
+    accuracy = evaluate_classifier(model, test_loader, device, num_classes, visualize=True)
     
     # 保存训练好的模型
     model_save_dir = Path("./trained_models")
@@ -474,7 +514,7 @@ def main():
         'epoch': args.epochs,
         'model_info': {
             'architecture': 'ResNet18',
-            'num_classes': 31,
+            'num_classes': num_classes,
             'input_size': (256, 256, 3),
             'data_type': 'real+synthetic' if args.synthetic_folder else 'real_only'
         }
