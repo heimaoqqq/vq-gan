@@ -488,9 +488,9 @@ def main():
         model, train_loader, criterion, optimizer, device, args.epochs, scheduler
     )
     
-    # 训练完成后进行测试（包含t-SNE可视化）
+    # 训练完成后进行测试（禁用t-SNE可视化以节省时间）
     print("\n评估分类器...")
-    accuracy = evaluate_classifier(model, test_loader, device, num_classes, visualize=True)
+    accuracy = evaluate_classifier(model, test_loader, device, num_classes, visualize=False)
     
     # 保存训练好的模型
     model_save_dir = Path("./trained_models")
