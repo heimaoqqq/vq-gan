@@ -54,6 +54,8 @@ class MicroDopplerDataset(Dataset):
                 raise ValueError(f"split must be 'train' or 'test', got {split}")
             
             for img_file in image_files:
+                # Normalize path separators for cross-platform compatibility
+                img_file = img_file.replace('\\', '/')
                 img_path = self.data_root / img_file
                 self.samples.append((img_path, label))
         
