@@ -63,7 +63,7 @@ class Config:
     """集中管理所有配置参数"""
     
     # === 路径配置 ===
-    vae_path = '/kaggle/input/kl-vae-best-pt/kl_vae_best.pt'
+    vae_path = '/kaggle/input/kl-vae/kl_vae_best.pt'
     data_path = '/kaggle/input/organized-gait-dataset/Normal_line'
     results_folder = './results'
     latents_cache_folder = './latents_cache'  # 预处理缓存
@@ -259,6 +259,8 @@ class LatentDataset(Dataset):
                     
                     # 获取训练集文件路径
                     for rel_path in user_info['train_images']:
+                        # Normalize path separators for cross-platform compatibility
+                        rel_path = rel_path.replace('\\', '/')
                         img_path = self.data_path / rel_path
                         if img_path.exists():
                             self.samples.append((img_path, label))
@@ -766,19 +768,8 @@ class LatentDiffusionTrainer:
             torch.save(data, str(latest_path))
             print(f"✓ 最新检查点: {latest_path}")
             
-            # 仅保留最近10个checkpoint（节省空间）
-            all_checkpoints = sorted(self.results_folder.glob('model-*.pt'), 
-                                    key=lambda p: int(p.stem.split('-')[1]) if p.stem != 'model-latest' else 999999)
-            # 排除model-latest.pt
-            all_checkpoints = [p for p in all_checkpoints if p.stem != 'model-latest']
-            
-            if len(all_checkpoints) > 10:
-                # 删除最旧的checkpoint
-                for old_ckpt in all_checkpoints[:-10]:
-                    old_ckpt.unlink()
-                print(f"  💾 保留最近10个checkpoint（已删除{len(all_checkpoints) - 10}个旧checkpoint）")
-            else:
-                print(f"  💾 当前有{len(all_checkpoints)}个checkpoint")
+            # 保存所有checkpoint（不删除）
+            print(f"  💾 保留所有checkpoint以便选择最佳模型")
             
         except Exception as e:
             print(f"  ✗ 保存检查点失败: {e}")
