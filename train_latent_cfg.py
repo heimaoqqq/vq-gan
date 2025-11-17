@@ -257,13 +257,16 @@ class LatentDataset(Dataset):
                     user_id = user_info['user_id']
                     label = user_info['label']
                     
-                    # 获取训练集文件路径
-                    for rel_path in user_info['train_images']:
-                        # Normalize path separators for cross-platform compatibility
-                        rel_path = rel_path.replace('\\', '/')
-                        img_path = self.data_path / rel_path
-                        if img_path.exists():
-                            self.samples.append((img_path, label))
+                    # 获取训练集文件路径（支持新的GMM预编码格式）
+                    # 优先使用gen_train_images（GMM预编码），其次使用train_images（旧格式）
+                    train_images_key = 'gen_train_images' if 'gen_train_images' in user_info else 'train_images'
+                    if train_images_key in user_info:
+                        for rel_path in user_info[train_images_key]:
+                            # Normalize path separators for cross-platform compatibility
+                            rel_path = rel_path.replace('\\', '/')
+                            img_path = self.data_path / rel_path
+                            if img_path.exists():
+                                self.samples.append((img_path, label))
                 
                 use_precomputed_split = True
                 print(f"✓ 使用预处理的训练集划分 ({sampling_method})")
