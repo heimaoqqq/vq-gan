@@ -120,6 +120,11 @@ def stratified_sample_from_clusters(image_paths, features, k, n_gen_train=30,
     """
     基于GMM聚类的分层抽样
     
+    策略：
+    1. 从每个聚类中均匀抽样，优先分配给gen_train和class_train
+    2. 确保恰好得到n_gen_train和n_class_train个样本
+    3. 剩余所有样本作为test集
+    
     Args:
         image_paths: 所有图像路径列表
         features: 图像特征矩阵 [N, D]
@@ -152,6 +157,7 @@ def stratified_sample_from_clusters(image_paths, features, k, n_gen_train=30,
     gen_train_indices = []
     class_train_indices = []
     test_indices = []
+    used_indices = set()
     
     for cluster_id in range(k):
         # 获取该聚类中的所有索引
@@ -171,7 +177,10 @@ def stratified_sample_from_clusters(image_paths, features, k, n_gen_train=30,
             gen_indices_float = np.linspace(0, n_samples - 1, n_gen)
             gen_indices = np.round(gen_indices_float).astype(int)
             gen_indices = np.unique(gen_indices)
-            gen_train_indices.extend(cluster_indices[gen_indices])
+            for idx in cluster_indices[gen_indices]:
+                if len(gen_train_indices) < n_gen_train:
+                    gen_train_indices.append(idx)
+                    used_indices.add(idx)
         
         # 从剩余样本中选择class_train
         remaining_mask = np.ones(n_samples, dtype=bool)
@@ -183,18 +192,19 @@ def stratified_sample_from_clusters(image_paths, features, k, n_gen_train=30,
                                              min(n_class, len(remaining_indices)))
             class_indices = np.round(class_indices_float).astype(int)
             class_indices = np.unique(class_indices)
-            class_train_indices.extend(cluster_indices[remaining_indices[class_indices]])
+            for idx in cluster_indices[remaining_indices[class_indices]]:
+                if len(class_train_indices) < n_class_train:
+                    class_train_indices.append(idx)
+                    used_indices.add(idx)
         
         # 剩余的作为测试集
-        test_mask = np.ones(n_samples, dtype=bool)
-        test_mask[gen_indices] = False
-        if len(remaining_indices) > 0:
-            test_mask[remaining_indices[class_indices]] = False
-        test_indices.extend(cluster_indices[test_mask])
+        for idx in cluster_indices:
+            if idx not in used_indices:
+                test_indices.append(idx)
     
-    # 确保gen_train和class_train的数量恰好为指定值
-    gen_train_indices = np.array(gen_train_indices)[:n_gen_train]
-    class_train_indices = np.array(class_train_indices)[:n_class_train]
+    # 转换为numpy数组
+    gen_train_indices = np.array(gen_train_indices)
+    class_train_indices = np.array(class_train_indices)
     test_indices = np.array(test_indices)
     
     # 验证：确保三个集合完全分离且数量正确
