@@ -153,54 +153,84 @@ def stratified_sample_from_clusters(image_paths, features, k, n_gen_train=30,
                              reg_covar=1e-5, covariance_type='diag', max_iter=200)
         cluster_labels = gmm.fit_predict(features)
     
-    # 从每个聚类中均匀抽样
+    # 分层抽样：使用最大余额法（Largest Remainder Method）
     gen_train_indices = []
     class_train_indices = []
     test_indices = []
-    used_indices = set()
     
+    # 第一步：计算每个聚类的大小
+    cluster_sizes = np.bincount(cluster_labels)  # 每个聚类的样本数
+    total_size = total_samples
+    
+    # 第二步：使用最大余额法分配样本数
+    # 计算每个聚类应该贡献的gen_train样本数
+    gen_quotas_float = (cluster_sizes / total_size) * n_gen_train
+    gen_quotas_int = np.floor(gen_quotas_float).astype(int)  # 整数部分
+    gen_remainders = gen_quotas_float - gen_quotas_int  # 余数部分
+    
+    # 将剩余的样本分配给余数最大的聚类
+    remaining_gen = n_gen_train - gen_quotas_int.sum()
+    if remaining_gen > 0:
+        top_remainder_indices = np.argsort(gen_remainders)[-remaining_gen:]
+        gen_quotas_int[top_remainder_indices] += 1
+    
+    # class_train的配额基于gen_train抽取后的剩余样本
+    # 每个聚类的剩余样本数 = 原始样本数 - gen_train配额
+    remaining_samples_per_cluster = cluster_sizes - gen_quotas_int
+    remaining_samples_total = remaining_samples_per_cluster.sum()
+    
+    # 从剩余样本中按比例分配class_train
+    class_quotas_float = (remaining_samples_per_cluster / remaining_samples_total) * n_class_train
+    class_quotas_int = np.floor(class_quotas_float).astype(int)
+    class_remainders = class_quotas_float - class_quotas_int
+    
+    remaining_class = n_class_train - class_quotas_int.sum()
+    if remaining_class > 0:
+        top_remainder_indices = np.argsort(class_remainders)[-remaining_class:]
+        class_quotas_int[top_remainder_indices] += 1
+    
+    # 第三步：从每个聚类中均匀抽样分配的样本数
     for cluster_id in range(k):
         # 获取该聚类中的所有索引
         cluster_mask = cluster_labels == cluster_id
         cluster_indices = np.where(cluster_mask)[0]
-        
-        # 该聚类中的样本数
         n_samples = len(cluster_indices)
         
-        # 从该聚类中均匀抽样
-        # 按比例分配：gen_train占30/50=60%，class_train占20/50=40%
-        n_gen = max(1, int(n_samples * n_gen_train / (n_gen_train + n_class_train)))
-        n_class = max(1, int(n_samples * n_class_train / (n_gen_train + n_class_train)))
+        if n_samples == 0:
+            continue
         
-        # 从聚类中均匀选择索引
-        if n_gen > 0:
-            gen_indices_float = np.linspace(0, n_samples - 1, n_gen)
+        # 该聚类应该贡献的样本数
+        n_gen_target = gen_quotas_int[cluster_id]
+        n_class_target = class_quotas_int[cluster_id]
+        
+        # 从聚类中均匀选择gen_train样本
+        if n_gen_target > 0 and n_samples > 0:
+            gen_indices_float = np.linspace(0, n_samples - 1, min(n_gen_target, n_samples))
             gen_indices = np.round(gen_indices_float).astype(int)
             gen_indices = np.unique(gen_indices)
-            for idx in cluster_indices[gen_indices]:
-                if len(gen_train_indices) < n_gen_train:
-                    gen_train_indices.append(idx)
-                    used_indices.add(idx)
+            gen_train_indices.extend(cluster_indices[gen_indices])
+        else:
+            gen_indices = np.array([], dtype=int)
         
-        # 从剩余样本中选择class_train
+        # 从剩余样本中均匀选择class_train样本
         remaining_mask = np.ones(n_samples, dtype=bool)
         remaining_mask[gen_indices] = False
         remaining_indices = np.where(remaining_mask)[0]
         
-        if len(remaining_indices) > 0 and n_class > 0:
+        if n_class_target > 0 and len(remaining_indices) > 0:
             class_indices_float = np.linspace(0, len(remaining_indices) - 1, 
-                                             min(n_class, len(remaining_indices)))
+                                             min(n_class_target, len(remaining_indices)))
             class_indices = np.round(class_indices_float).astype(int)
             class_indices = np.unique(class_indices)
-            for idx in cluster_indices[remaining_indices[class_indices]]:
-                if len(class_train_indices) < n_class_train:
-                    class_train_indices.append(idx)
-                    used_indices.add(idx)
+            class_train_indices.extend(cluster_indices[remaining_indices[class_indices]])
+        else:
+            class_indices = np.array([], dtype=int)
         
         # 剩余的作为测试集
-        for idx in cluster_indices:
-            if idx not in used_indices:
-                test_indices.append(idx)
+        test_mask = np.ones(n_samples, dtype=bool)
+        test_mask[gen_indices] = False
+        test_mask[remaining_indices[class_indices]] = False
+        test_indices.extend(cluster_indices[test_mask])
     
     # 转换为numpy数组
     gen_train_indices = np.array(gen_train_indices)
