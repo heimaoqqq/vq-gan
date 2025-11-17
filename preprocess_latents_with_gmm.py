@@ -192,10 +192,17 @@ def stratified_sample_from_clusters(image_paths, features, k, n_gen_train=30,
             test_mask[remaining_indices[class_indices]] = False
         test_indices.extend(cluster_indices[test_mask])
     
-    # 确保gen_train和class_train的数量不超过总数
+    # 确保gen_train和class_train的数量恰好为指定值
     gen_train_indices = np.array(gen_train_indices)[:n_gen_train]
     class_train_indices = np.array(class_train_indices)[:n_class_train]
     test_indices = np.array(test_indices)
+    
+    # 验证：确保三个集合完全分离且数量正确
+    assert len(gen_train_indices) <= n_gen_train, f"gen_train数量过多: {len(gen_train_indices)}"
+    assert len(class_train_indices) <= n_class_train, f"class_train数量过多: {len(class_train_indices)}"
+    assert len(set(gen_train_indices) & set(class_train_indices)) == 0, "gen_train和class_train有重叠"
+    assert len(set(gen_train_indices) & set(test_indices)) == 0, "gen_train和test有重叠"
+    assert len(set(class_train_indices) & set(test_indices)) == 0, "class_train和test有重叠"
     
     return (gen_train_indices, 
             class_train_indices, 
@@ -330,7 +337,7 @@ def preprocess_dataset(vae_path, data_path, output_folder, num_users=31,
         all_samples.extend(class_train_latents)
         all_samples.extend(test_latents)
         
-        print(f"✓ K={k}, gen_train={len(gen_train_paths)}, class_train={len(class_train_paths)}, test={len(test_paths)}")
+        print(f"✓ K={k}, gen_train={len(gen_train_paths)}, class_train={len(class_train_paths)}, test={len(test_paths)} (总计{total_images})")
     
     # 统计
     gen_train_count = sum(1 for _, _, _, split in all_samples if split == 'gen_train')
@@ -341,9 +348,9 @@ def preprocess_dataset(vae_path, data_path, output_folder, num_users=31,
     print(f"数据集划分统计:")
     print(f"{'='*60}")
     print(f"  采样方法: GMM分层均匀抽样")
-    print(f"  gen_train: {gen_train_count} 张 (生成模型训练)")
-    print(f"  class_train: {class_train_count} 张 (分类器训练)")
-    print(f"  test: {test_count} 张 (测试集)")
+    print(f"  gen_train: {gen_train_count} 张 (生成模型训练, {gen_train_count//31}/用户)")
+    print(f"  class_train: {class_train_count} 张 (分类器训练, {class_train_count//31}/用户)")
+    print(f"  test: {test_count} 张 (测试集, {test_count//31}/用户)")
     print(f"  总计编码: {len(all_samples)} 张")
     print(f"  三个集合完全分离: ✓")
     print(f"{'='*60}\n")
