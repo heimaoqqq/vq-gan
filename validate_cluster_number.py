@@ -1,6 +1,6 @@
 """
-验证最优簇数：使用肘部法则和轮廓系数
-目标：为K-Medoids聚类找到最优的k值
+验证最优簇数：使用GMM和多种评估指标
+目标：为高斯混合模型找到最优的k值
 """
 
 import torch
@@ -9,7 +9,7 @@ from pathlib import Path
 from PIL import Image
 from torchvision import transforms
 from sklearn.preprocessing import StandardScaler
-from sklearn_extra.cluster import KMedoids
+from sklearn.mixture import GaussianMixture
 from sklearn.metrics import silhouette_score, davies_bouldin_score, calinski_harabasz_score
 import matplotlib.pyplot as plt
 import argparse
@@ -95,37 +95,43 @@ def encode_images_to_features(image_folder, vae, device='cuda', max_images=None)
 
 
 def compute_elbow_metrics(features_scaled, k_range, seed=42):
-    """计算不同k值的评估指标"""
+    """计算不同k值的GMM评估指标"""
     print(f"\n测试簇数范围: {list(k_range)}")
     
     metrics = {
-        'inertia': [],
+        'bic': [],
+        'aic': [],
         'silhouette': [],
         'davies_bouldin': [],
         'calinski_harabasz': []
     }
     
     for k in tqdm(k_range, desc="聚类评估"):
-        # K-Medoids聚类
-        kmedoids = KMedoids(n_clusters=k, random_state=seed, method='pam')
-        labels = kmedoids.fit_predict(features_scaled)
+        # 高斯混合模型
+        gmm = GaussianMixture(n_components=k, random_state=seed, n_init=10)
+        labels = gmm.fit_predict(features_scaled)
         
-        # 1. Inertia（簇内距离和，越小越好）
-        metrics['inertia'].append(kmedoids.inertia_)
+        # 1. BIC（贝叶斯信息准则，越小越好）
+        bic = gmm.bic(features_scaled)
+        metrics['bic'].append(bic)
         
-        # 2. Silhouette Score（轮廓系数，[-1, 1]，越大越好）
+        # 2. AIC（赤池信息准则，越小越好）
+        aic = gmm.aic(features_scaled)
+        metrics['aic'].append(aic)
+        
+        # 3. Silhouette Score（轮廓系数，[-1, 1]，越大越好）
         silhouette = silhouette_score(features_scaled, labels)
         metrics['silhouette'].append(silhouette)
         
-        # 3. Davies-Bouldin Index（越小越好）
+        # 4. Davies-Bouldin Index（越小越好）
         db_score = davies_bouldin_score(features_scaled, labels)
         metrics['davies_bouldin'].append(db_score)
         
-        # 4. Calinski-Harabasz Index（越大越好）
+        # 5. Calinski-Harabasz Index（越大越好）
         ch_score = calinski_harabasz_score(features_scaled, labels)
         metrics['calinski_harabasz'].append(ch_score)
         
-        print(f"  k={k}: Inertia={kmedoids.inertia_:.2f}, "
+        print(f"  k={k}: BIC={bic:.2f}, AIC={aic:.2f}, "
               f"Silhouette={silhouette:.4f}, "
               f"DB={db_score:.4f}, "
               f"CH={ch_score:.2f}")
@@ -158,23 +164,34 @@ def find_elbow_point(x, y):
 
 def plot_metrics(k_range, metrics, output_path='cluster_validation.png'):
     """绘制评估指标"""
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
     
     k_list = list(k_range)
     
-    # 1. Inertia（肘部法则）
+    # 1. BIC（贝叶斯信息准则）
     ax = axes[0, 0]
-    ax.plot(k_list, metrics['inertia'], 'bo-', linewidth=2, markersize=8)
-    elbow_k = find_elbow_point(np.array(k_list), np.array(metrics['inertia']))
-    ax.axvline(x=elbow_k, color='r', linestyle='--', linewidth=2, label=f'Elbow at k={elbow_k}')
+    ax.plot(k_list, metrics['bic'], 'bo-', linewidth=2, markersize=8)
+    best_k = k_list[np.argmin(metrics['bic'])]
+    ax.axvline(x=best_k, color='r', linestyle='--', linewidth=2, label=f'Best at k={best_k}')
     ax.set_xlabel('Number of Clusters (k)', fontsize=12)
-    ax.set_ylabel('Inertia (lower is better)', fontsize=12)
-    ax.set_title('Elbow Method', fontsize=14, fontweight='bold')
+    ax.set_ylabel('BIC (lower is better)', fontsize=12)
+    ax.set_title('BIC Score', fontsize=14, fontweight='bold')
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=10)
     
-    # 2. Silhouette Score
+    # 2. AIC（赤池信息准则）
     ax = axes[0, 1]
+    ax.plot(k_list, metrics['aic'], 'co-', linewidth=2, markersize=8)
+    best_k = k_list[np.argmin(metrics['aic'])]
+    ax.axvline(x=best_k, color='r', linestyle='--', linewidth=2, label=f'Best at k={best_k}')
+    ax.set_xlabel('Number of Clusters (k)', fontsize=12)
+    ax.set_ylabel('AIC (lower is better)', fontsize=12)
+    ax.set_title('AIC Score', fontsize=14, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=10)
+    
+    # 3. Silhouette Score
+    ax = axes[0, 2]
     ax.plot(k_list, metrics['silhouette'], 'go-', linewidth=2, markersize=8)
     best_k = k_list[np.argmax(metrics['silhouette'])]
     ax.axvline(x=best_k, color='r', linestyle='--', linewidth=2, label=f'Best at k={best_k}')
@@ -184,7 +201,7 @@ def plot_metrics(k_range, metrics, output_path='cluster_validation.png'):
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=10)
     
-    # 3. Davies-Bouldin Index
+    # 4. Davies-Bouldin Index
     ax = axes[1, 0]
     ax.plot(k_list, metrics['davies_bouldin'], 'ro-', linewidth=2, markersize=8)
     best_k = k_list[np.argmin(metrics['davies_bouldin'])]
@@ -195,7 +212,7 @@ def plot_metrics(k_range, metrics, output_path='cluster_validation.png'):
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=10)
     
-    # 4. Calinski-Harabasz Index
+    # 5. Calinski-Harabasz Index
     ax = axes[1, 1]
     ax.plot(k_list, metrics['calinski_harabasz'], 'mo-', linewidth=2, markersize=8)
     best_k = k_list[np.argmax(metrics['calinski_harabasz'])]
@@ -203,6 +220,25 @@ def plot_metrics(k_range, metrics, output_path='cluster_validation.png'):
     ax.set_xlabel('Number of Clusters (k)', fontsize=12)
     ax.set_ylabel('Calinski-Harabasz Index (higher is better)', fontsize=12)
     ax.set_title('Calinski-Harabasz Index', fontsize=14, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=10)
+    
+    # 6. 综合评分（归一化）
+    ax = axes[1, 2]
+    # 归一化各指标并计算综合评分
+    bic_norm = (np.array(metrics['bic']) - min(metrics['bic'])) / (max(metrics['bic']) - min(metrics['bic']))
+    aic_norm = (np.array(metrics['aic']) - min(metrics['aic'])) / (max(metrics['aic']) - min(metrics['aic']))
+    sil_norm = 1 - (np.array(metrics['silhouette']) - min(metrics['silhouette'])) / (max(metrics['silhouette']) - min(metrics['silhouette']))
+    db_norm = (np.array(metrics['davies_bouldin']) - min(metrics['davies_bouldin'])) / (max(metrics['davies_bouldin']) - min(metrics['davies_bouldin']))
+    ch_norm = 1 - (np.array(metrics['calinski_harabasz']) - min(metrics['calinski_harabasz'])) / (max(metrics['calinski_harabasz']) - min(metrics['calinski_harabasz']))
+    
+    combined_score = (bic_norm + aic_norm + sil_norm + db_norm + ch_norm) / 5
+    ax.plot(k_list, combined_score, 'ko-', linewidth=2, markersize=8)
+    best_k = k_list[np.argmin(combined_score)]
+    ax.axvline(x=best_k, color='r', linestyle='--', linewidth=2, label=f'Best at k={best_k}')
+    ax.set_xlabel('Number of Clusters (k)', fontsize=12)
+    ax.set_ylabel('Combined Score (lower is better)', fontsize=12)
+    ax.set_title('Combined Score', fontsize=14, fontweight='bold')
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=10)
     
@@ -218,8 +254,8 @@ def analyze_cluster_sizes(features_scaled, k_range, seed=42):
     print("="*60)
     
     for k in k_range:
-        kmedoids = KMedoids(n_clusters=k, random_state=seed, method='pam')
-        labels = kmedoids.fit_predict(features_scaled)
+        gmm = GaussianMixture(n_components=k, random_state=seed, n_init=10)
+        labels = gmm.fit_predict(features_scaled)
         cluster_sizes = np.bincount(labels)
         
         print(f"\nk={k}:")
@@ -283,9 +319,13 @@ def main():
     
     k_list = list(k_range)
     
-    # 肘部法则
-    elbow_k = find_elbow_point(np.array(k_list), np.array(metrics['inertia']))
-    print(f"肘部法则推荐: k={elbow_k}")
+    # BIC推荐
+    best_bic_k = k_list[np.argmin(metrics['bic'])]
+    print(f"BIC推荐: k={best_bic_k} (score={min(metrics['bic']):.2f})")
+    
+    # AIC推荐
+    best_aic_k = k_list[np.argmin(metrics['aic'])]
+    print(f"AIC推荐: k={best_aic_k} (score={min(metrics['aic']):.2f})")
     
     # 轮廓系数
     best_silhouette_k = k_list[np.argmax(metrics['silhouette'])]
@@ -300,7 +340,7 @@ def main():
     print(f"Calinski-Harabasz推荐: k={best_ch_k} (score={max(metrics['calinski_harabasz']):.2f})")
     
     # 综合推荐
-    recommendations = [elbow_k, best_silhouette_k, best_db_k, best_ch_k]
+    recommendations = [best_bic_k, best_aic_k, best_silhouette_k, best_db_k, best_ch_k]
     from collections import Counter
     most_common = Counter(recommendations).most_common(1)[0][0]
     
