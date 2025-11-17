@@ -101,11 +101,11 @@ class Config:
     cond_scale = 1.0  # 不用CFG（未训练unconditional）
     rescaled_phi = 0.0  # 不用CFG++
     
-    # === 训练配置（Baseline：batch=8, 无梯度累积, 3000步）===
+    # === 训练配置（Baseline：batch=8, 无梯度累积, 5000步）===
     train_batch_size = 8  # batch size：Baseline配置
     gradient_accumulate_every = 1  # 无梯度累积：每步更新一次
     train_lr = 4e-5  # 学习率：标准值
-    train_num_steps = 3000  # 训练步数：Baseline配置（3000步 ≈ 26个epoch）
+    train_num_steps = 5000  # 训练步数：Baseline配置（5000步 ≈ 54个epoch）
     
     # Learning Rate Schedule
     use_lr_warmup = False  # Baseline关闭学习率warmup
@@ -148,7 +148,7 @@ class Config:
     auto_normalize = False  # 默认False，运行test_vae_range.py后根据结果调整
     
     # === 监控配置 ===
-    save_and_sample_every = 300  # 每300步保存和生成可视化
+    save_and_sample_every = 500  # 每500步保存和生成可视化（5000步时共10次）
     num_samples = 16  # 生成16张检查
     
     # === 其他 ===
