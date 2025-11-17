@@ -121,13 +121,13 @@ def parse_args():
     parser.add_argument(
         "--vae_path",
         type=str,
-        default=r"D:\Ysj\新建文件夹\VA-VAE\klvae_checkpoints\kl_vae_best.pt",
+        default=r"/kaggle/input/kl-vae-best-pt/kl_vae_best.pt",
         help="VAE模型路径",
     )
     parser.add_argument(
         "--data_path",
         type=str,
-        default=r"D:\Ysj\新建文件夹\VA-VAE\dataset\organized_gait_dataset\kaggle\working\organized_gait_dataset\Normal_line",
+        default=r"/kaggle/input/organized-gait-dataset/Normal_line",
         help="数据集路径",
     )
     parser.add_argument(
