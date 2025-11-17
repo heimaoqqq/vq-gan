@@ -101,15 +101,15 @@ class Config:
     cond_scale = 1.0  # 不用CFG（未训练unconditional）
     rescaled_phi = 0.0  # 不用CFG++
     
-    # === 训练配置（针对RTX 5880 48GB + 小数据集优化）===
-    train_batch_size = 12  # batch size：模型44M参数，48GB显存绰绰有余
-    gradient_accumulate_every = 3  # 梯度累积：有效batch=36，保持训练稳定性
+    # === 训练配置（Baseline：batch=8, 无梯度累积, 3000步）===
+    train_batch_size = 8  # batch size：Baseline配置
+    gradient_accumulate_every = 1  # 无梯度累积：每步更新一次
     train_lr = 4e-5  # 学习率：标准值
-    train_num_steps = 60000  # 训练步数：约1290 epochs
+    train_num_steps = 3000  # 训练步数：Baseline配置（3000步 ≈ 26个epoch）
     
     # Learning Rate Schedule
-    use_lr_warmup = True  # 使用学习率warmup
-    warmup_steps = 1000  # 前1000步warmup
+    use_lr_warmup = False  # Baseline关闭学习率warmup
+    warmup_steps = 0  # 无warmup
     
     # === 优化配置（防止过拟合 + 增加多样性）===
     use_ema = True  # 是否使用EMA（Baseline设为False）
@@ -148,7 +148,7 @@ class Config:
     auto_normalize = False  # 默认False，运行test_vae_range.py后根据结果调整
     
     # === 监控配置 ===
-    save_and_sample_every = 1000  # 每1000步保存（小数据集更频繁观察，避免错过最佳点）
+    save_and_sample_every = 300  # 每300步保存和生成可视化
     num_samples = 16  # 生成16张检查
     
     # === 其他 ===
@@ -594,11 +594,12 @@ class LatentDiffusionTrainer:
                     
                     self.accelerator.backward(loss)
                 
-                # 梯度裁剪
-                self.accelerator.clip_grad_norm_(
-                    self.diffusion.parameters(),
-                    config.max_grad_norm
-                )
+                # 梯度裁剪（如果启用）
+                if config.max_grad_norm is not None:
+                    self.accelerator.clip_grad_norm_(
+                        self.diffusion.parameters(),
+                        config.max_grad_norm
+                    )
                 
                 # 优化器步进
                 self.opt.step()
