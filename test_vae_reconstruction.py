@@ -49,11 +49,20 @@ def load_images(dataset_path, num_images=10):
     image_files = image_files[:num_images]
     print(f"找到 {len(image_files)} 张图像，将加载前 {num_images} 张")
     
+    # 使用 torchvision transforms，与训练代码一致
+    from torchvision import transforms
+    transform = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(256),
+        transforms.ToTensor()  # 自动归一化到 [0, 1]
+    ])
+    
     images = []
     for img_path in tqdm(image_files, desc="加载图像"):
         try:
             img = Image.open(img_path).convert('RGB')
-            img_array = np.array(img).astype(np.float32) / 255.0  # 归一化到 [0, 1]
+            img_tensor = transform(img)  # [3, 256, 256]，值在 [0, 1]
+            img_array = img_tensor.permute(1, 2, 0).numpy()  # [256, 256, 3]
             images.append((img_path.name, img_array))
         except Exception as e:
             print(f"⚠️ 加载失败 {img_path}: {e}")
@@ -110,8 +119,9 @@ def test_vae_reconstruction(vae, images, output_dir="./vae_test_results"):
     
     with torch.no_grad():
         for img_name, img_array in tqdm(images, desc="处理图像"):
+            # img_array 已经是 [H, W, 3]，值在 [0, 1]
             # 转换为张量 [1, 3, H, W]
-            img_tensor = torch.from_numpy(img_array).permute(2, 0, 1).unsqueeze(0).to(device)
+            img_tensor = torch.from_numpy(img_array).permute(2, 0, 1).unsqueeze(0).float().to(device)
             
             # 编码
             # encode() 返回 DiagonalGaussianDistribution，需要采样
@@ -121,7 +131,7 @@ def test_vae_reconstruction(vae, images, output_dir="./vae_test_results"):
             # 解码
             reconstructed_tensor = vae.decode_latents(latents)
             
-            # 转换回 numpy
+            # 转换回 numpy [H, W, 3]
             reconstructed_array = reconstructed_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
             reconstructed_array = np.clip(reconstructed_array, 0, 1)
             
