@@ -203,7 +203,7 @@ def test_vae_reconstruction(vae, images, output_dir="./vae_test_results"):
 def main():
     # 配置
     vae_path = "/kaggle/input/kl-vae-best-pt/kl_vae_best.pt"
-    dataset_path = "/kaggle/input/organized-gait-dataset/Normal_line/ID_24"
+    dataset_path = "/kaggle/input/organized-gait-dataset/Normal_line/ID_16"
     output_dir = "./vae_test_results"
     num_test_images = 10
     
