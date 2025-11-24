@@ -123,13 +123,12 @@ def test_vae_reconstruction(vae, images, output_dir="./vae_test_results"):
             # 转换为张量 [1, 3, H, W]
             img_tensor = torch.from_numpy(img_array).permute(2, 0, 1).unsqueeze(0).float().to(device)
             
-            # 编码
-            # encode() 返回 DiagonalGaussianDistribution，需要采样
-            distribution = vae.encode(img_tensor)
-            latents = distribution.sample()  # 从分布中采样
+            # 编码（使用 encode_images，会自动乘以 scale_factor）
+            # 这与 train_latent_cfg.py 中的使用方式一致
+            latents = vae.encode_images(img_tensor)  # [1, 4, 32, 32]，已乘以 scale_factor
             
-            # 解码
-            reconstructed_tensor = vae.decode_latents(latents)
+            # 解码（使用 decode_latents，会自动除以 scale_factor）
+            reconstructed_tensor = vae.decode_latents(latents)  # [1, 3, 256, 256]，值在 [0, 1]
             
             # 转换回 numpy [H, W, 3]
             reconstructed_array = reconstructed_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
