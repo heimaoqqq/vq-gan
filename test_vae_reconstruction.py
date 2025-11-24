@@ -114,7 +114,9 @@ def test_vae_reconstruction(vae, images, output_dir="./vae_test_results"):
             img_tensor = torch.from_numpy(img_array).permute(2, 0, 1).unsqueeze(0).to(device)
             
             # 编码
-            latents = vae.encode(img_tensor)
+            # encode() 返回 DiagonalGaussianDistribution，需要采样
+            distribution = vae.encode(img_tensor)
+            latents = distribution.sample()  # 从分布中采样
             
             # 解码
             reconstructed_tensor = vae.decode_latents(latents)
